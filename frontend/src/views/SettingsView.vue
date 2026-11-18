@@ -36,6 +36,23 @@ const eng = reactive({
 })
 // 运行时搜索目录：用多行文本编辑，保存时按行拆开
 const runtimeDirsText = ref('')
+// 生图引擎配置（对应 config.image，stable-diffusion.cpp）
+const img = reactive({
+  enabled: false,
+  exe_path: '',
+  model_dir: '',
+  model_path: '',
+  extra_args: '',
+  port: 1234,
+  backend: 'cuda',
+  offload_to_cpu: true,
+  unload_llm: true,
+  default_width: 512,
+  default_height: 512,
+  default_steps: 25,
+  default_cfg_scale: 7,
+})
+const imgPickBusy = ref(false)
 const svc = reactive({
   max_concurrent_requests: 4,
   request_timeout: 300,
@@ -105,6 +122,21 @@ watch(
     eng.auto_detect = e.auto_detect !== false
     eng.keep_alive = !!e.keep_alive
     runtimeDirsText.value = (e.runtime_dirs || []).join('\n')
+
+    const im = c.image || {}
+    img.enabled = !!im.enabled
+    img.exe_path = im.exe_path || ''
+    img.model_dir = im.model_dir || ''
+    img.model_path = im.model_path || ''
+    img.extra_args = im.extra_args || ''
+    img.port = im.port || 1234
+    img.backend = im.backend || 'cuda'
+    img.offload_to_cpu = im.offload_to_cpu !== false
+    img.unload_llm = im.unload_llm !== false
+    img.default_width = im.default_width || 512
+    img.default_height = im.default_height || 512
+    img.default_steps = im.default_steps || 25
+    img.default_cfg_scale = im.default_cfg_scale || 7
 
     // 模板自动映射：mode/text 优先匹配内置模板 id 供下拉回显，匹配不到记为自定义
     tplAuto.enabled = c.template_auto_enabled !== false
@@ -187,6 +219,60 @@ async function saveEngine() {
     notify(e.message, 'err', 6000)
   } finally {
     saving.value = false
+  }
+}
+
+function imagePatch() {
+  return {
+    enabled: !!img.enabled,
+    exe_path: img.exe_path.trim(),
+    model_dir: img.model_dir.trim(),
+    model_path: img.model_path.trim(),
+    extra_args: (img.extra_args || '').trim(),
+    port: Number(img.port) || 1234,
+    backend: img.backend,
+    offload_to_cpu: !!img.offload_to_cpu,
+    unload_llm: !!img.unload_llm,
+    default_width: Number(img.default_width) || 512,
+    default_height: Number(img.default_height) || 512,
+    default_steps: Number(img.default_steps) || 25,
+    default_cfg_scale: Number(img.default_cfg_scale) || 7,
+  }
+}
+
+async function saveImage() {
+  saving.value = true
+  try {
+    state.config = await api.saveConfig({ image: imagePatch() })
+    notify('生图引擎设置已保存', 'ok')
+  } catch (e) {
+    notify(e.message, 'err', 6000)
+  } finally {
+    saving.value = false
+  }
+}
+
+async function pickImageExe() {
+  imgPickBusy.value = true
+  try {
+    const r = await api.pickFile('选择 sd-server.exe', img.exe_path, 'exe')
+    if (r && r.path) img.exe_path = r.path
+  } catch (e) {
+    notify(e.message, 'err')
+  } finally {
+    imgPickBusy.value = false
+  }
+}
+
+async function pickImageDir() {
+  imgPickBusy.value = true
+  try {
+    const r = await api.pickFolder('选择生图模型目录', img.model_dir)
+    if (r && r.path) img.model_dir = r.path
+  } catch (e) {
+    notify(e.message, 'err')
+  } finally {
+    imgPickBusy.value = false
   }
 }
 
@@ -606,6 +692,105 @@ onUnmounted(stopInstallPoll)
           变体优先级由硬件决定：有 N 卡用 <span class="mono">cuda</span>，否则 <span class="mono">vulkan</span>，
           再否则 <span class="mono">cpu</span>。探测结果里的第一个就是会被使用的那个。
         </div>
+      </div>
+    </div>
+
+    <!-- 生图引擎：stable-diffusion.cpp 的 sd-server，与文本引擎完全独立 -->
+    <div class="card" style="grid-column: 1 / -1">
+      <div class="card-head">
+        <h3>生图引擎（stable-diffusion.cpp）</h3>
+        <div class="spacer"></div>
+        <span class="badge" :class="img.enabled ? 'ok' : ''">{{ img.enabled ? '已启用' : '未启用' }}</span>
+      </div>
+      <div class="hint" style="margin-bottom: 12px; line-height: 1.7">
+        生图走独立的 <span class="mono">sd-server.exe</span>，与文本模型不是同一个引擎。
+        需要先从 stable-diffusion.cpp 的 GitHub Release 下载 Windows CUDA 版
+        （<span class="mono">sd-master-*-bin-win-cuda12-x64.zip</span> 和
+        <span class="mono">cudart-sd-bin-win-cu12-x64.zip</span>，解压到同一目录），再在下面填 exe 路径。
+        8GB 显存下生图和文本不能同时跑，程序会自动互斥切换。
+      </div>
+
+      <label class="row" style="gap: 8px; margin-bottom: 12px">
+        <input type="checkbox" v-model="img.enabled" style="width: auto" />
+        <span>启用生图功能</span>
+      </label>
+
+      <div class="grid cols-2" style="gap: 12px">
+        <label class="field">
+          <span>sd-server.exe 路径</span>
+          <div class="row" style="gap: 6px">
+            <input v-model="img.exe_path" placeholder="例如 D:\sd.cpp\sd-server.exe" style="flex: 1" />
+            <button class="sm" type="button" :disabled="imgPickBusy" @click="pickImageExe">浏览…</button>
+          </div>
+        </label>
+        <label class="field">
+          <span>生图模型目录（gguf / safetensors / ckpt）</span>
+          <div class="row" style="gap: 6px">
+            <input v-model="img.model_dir" placeholder="例如 E:\LM\SD\models" style="flex: 1" />
+            <button class="sm" type="button" :disabled="imgPickBusy" @click="pickImageDir">浏览…</button>
+          </div>
+        </label>
+      </div>
+
+      <label class="field">
+        <span>默认生图模型路径（sd-server 单文件模型，可留空在生图页选）</span>
+        <input v-model="img.model_path" placeholder="例如 E:\LM\SD\models\v1-5-pruned.gguf" />
+      </label>
+
+      <label class="field">
+        <span>额外启动参数（Flux / Z-Image 等多组件模型用，原样拼到命令行）</span>
+        <input v-model="img.extra_args" placeholder='例如 --diffusion-model "E:\SD\flux.gguf" --llm "E:\SD\t5.gguf" --vae "E:\SD\ae.sft"' />
+        <span class="hint" style="margin-top: 4px">单文件 SD1.5/SDXL 不用填；上面的「默认生图模型」会自动用 <span class="mono">-m</span> 传入。</span>
+      </label>
+
+      <div class="grid cols-3" style="gap: 12px">
+        <label class="field">
+          <span>端口</span>
+          <input v-model.number="img.port" type="number" min="1" max="65535" />
+        </label>
+        <label class="field">
+          <span>后端</span>
+          <select v-model="img.backend">
+            <option value="cuda">CUDA（N 卡）</option>
+            <option value="vulkan">Vulkan（通用）</option>
+            <option value="cpu">CPU</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>默认步数</span>
+          <input v-model.number="img.default_steps" type="number" min="1" max="100" />
+        </label>
+      </div>
+
+      <div class="grid cols-3" style="gap: 12px">
+        <label class="field">
+          <span>默认宽</span>
+          <input v-model.number="img.default_width" type="number" min="64" step="64" />
+        </label>
+        <label class="field">
+          <span>默认高</span>
+          <input v-model.number="img.default_height" type="number" min="64" step="64" />
+        </label>
+        <label class="field">
+          <span>默认 CFG</span>
+          <input v-model.number="img.default_cfg_scale" type="number" min="1" step="0.5" />
+        </label>
+      </div>
+
+      <div class="grid cols-2" style="gap: 12px; margin-bottom: 6px">
+        <label class="row" style="gap: 8px; align-items: center">
+          <input type="checkbox" v-model="img.offload_to_cpu" style="width: auto" />
+          <span class="hint">权重留内存按需进显存（省显存，推荐开）</span>
+        </label>
+        <label class="row" style="gap: 8px; align-items: center">
+          <input type="checkbox" v-model="img.unload_llm" style="width: auto" />
+          <span class="hint">生图前自动卸载文本模型释放显存</span>
+        </label>
+      </div>
+
+      <div class="row">
+        <button class="primary" :disabled="saving" @click="saveImage">保存生图设置</button>
+        <span class="hint">保存后到左侧「生图」页启动引擎、填提示词出图。</span>
       </div>
     </div>
 

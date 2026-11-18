@@ -9,11 +9,13 @@ import Params from './views/ParamsView.vue'
 import Service from './views/ServiceView.vue'
 import Logs from './views/LogsView.vue'
 import Settings from './views/SettingsView.vue'
+import Image from './views/ImageView.vue'
 
 const nav = [
   { id: 'dashboard', label: '仪表盘', icon: '◉', comp: Dashboard },
   { id: 'models', label: '模型', icon: '▣', comp: Models },
   { id: 'params', label: '参数', icon: '⚙', comp: Params },
+  { id: 'image', label: '生图', icon: '✦', comp: Image },
   { id: 'service', label: '服务', icon: '⇄', comp: Service },
   { id: 'logs', label: '日志', icon: '≡', comp: Logs },
   { id: 'settings', label: '设置', icon: '✳', comp: Settings },

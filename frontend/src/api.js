@@ -163,4 +163,12 @@ export const api = {
 
   config: () => request('/api/v1/config'),
   saveConfig: (patch) => request('/api/v1/config', { method: 'PUT', body: { patch } }),
+
+  // 生图（stable-diffusion.cpp）
+  imageStatus: () => request('/api/v1/image/status'),
+  imageModels: () => request('/api/v1/image/models'),
+  imageStart: (model) => request('/api/v1/image/start', { method: 'POST', body: { model }, timeout: 330000 }),
+  imageStop: () => request('/api/v1/image/stop', { method: 'POST' }),
+  imageGenerate: (payload) =>
+    request('/api/v1/image/generate', { method: 'POST', body: payload, timeout: 600000 }),
 }

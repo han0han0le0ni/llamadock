@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"airunner/internal/core"
+	"airunner/internal/engine/sdcpp"
 	"airunner/internal/params"
 	"airunner/internal/reqlog"
 )
@@ -110,6 +111,7 @@ func (g *Gateway) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/chat/completions", g.handleCompletions("/v1/chat/completions"))
 	mux.HandleFunc("POST /v1/completions", g.handleCompletions("/v1/completions"))
 	mux.HandleFunc("POST /v1/embeddings", g.handleCompletions("/v1/embeddings"))
+	mux.HandleFunc("POST /v1/images/generations", g.handleImageGenerations)
 	mux.HandleFunc("GET /v1/models", g.handleModels)
 	mux.HandleFunc("GET /healthz", g.handleHealthz)
 	mux.HandleFunc("GET /readyz", g.handleReadyz)
@@ -197,6 +199,35 @@ func (g *Gateway) handleModels(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
+}
+
+// handleImageGenerations 处理 OpenAI 兼容的生图请求（/v1/images/generations）。
+// 与文本请求完全不同：走独立的 sd.cpp 引擎，响应是 base64 图片，没有流式。
+func (g *Gateway) handleImageGenerations(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 32<<20))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_request_error", "读取请求体失败", "bad_body")
+		return
+	}
+	var req sdcpp.GenerateRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_request_error", "请求体不是合法 JSON："+err.Error(), "bad_json")
+		return
+	}
+	resp, err := g.core.ImageGenerate(r.Context(), req)
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "image_engine_error", err.Error(), "image_engine_error")
+		return
+	}
+	defer resp.Body.Close()
+	// 透传 sd-server 的响应（含 data[].b64_json）
+	for k, vals := range resp.Header {
+		for _, v := range vals {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
 }
 
 // handleCompletions 处理推理请求：参数合并 → 转发 → 多格式输出 → 记账。

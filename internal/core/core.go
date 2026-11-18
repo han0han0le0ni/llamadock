@@ -22,6 +22,7 @@ import (
 	"airunner/internal/config"
 	"airunner/internal/engine"
 	"airunner/internal/engine/llamacpp"
+	"airunner/internal/engine/sdcpp"
 	"airunner/internal/gguf"
 	"airunner/internal/hwprobe"
 	"airunner/internal/logging"
@@ -49,6 +50,10 @@ type Core struct {
 	//   - llama：具体类型，提供运行时候选探测、端口池、子进程生命周期等专属能力。
 	eng   engine.Adapter
 	llama *llamacpp.Manager
+
+	// sd 生图引擎（stable-diffusion.cpp 的 sd-server），与文本引擎完全独立。
+	// 8GB 显存下两者不能同时进显存；生图前可按配置 UnloadLLM 腾出显存。
+	sd *sdcpp.Manager
 
 	mu        sync.RWMutex
 	hw        *hwprobe.Profile
@@ -102,6 +107,7 @@ func New(cfg *config.Manager, log *slog.Logger, ring *logging.Ring, adminAddr st
 	}
 	c.llama = llamacpp.New(c.llamaConfig(snap))
 	c.eng = c.llama
+	c.sd = sdcpp.New(c.imageConfig(snap))
 	c.ctx, c.cancel = context.WithCancel(context.Background())
 	// 启动时先对齐「配置对象 ↔ 参数表」中的服务参数，避免两处取值不一致
 	if _, err := cfg.Update(func(cc *config.Config) { mirrorServerToParams(cc) }); err != nil {
@@ -138,6 +144,35 @@ func (c *Core) llamaConfig(snap config.Config) llamacpp.Config {
 	}
 }
 
+// imageConfig 把配置翻译成 sdcpp 管理器参数（含日志回调）。
+func (c *Core) imageConfig(snap config.Config) sdcpp.Config {
+	img := snap.Image
+	return sdcpp.Config{
+		ExePath:      img.ExePath,
+		ModelDir:     img.ModelDir,
+		ModelPath:    img.ModelPath,
+		ExtraArgs:    img.ExtraArgs,
+		Port:         img.Port,
+		Backend:      img.Backend,
+		OffloadToCPU: img.OffloadToCPU,
+		LogDir:       filepath.Dir(c.Cfg.Path()),
+		OnLog: func(line string) {
+			c.Log.Debug("sd-server", "line", line)
+		},
+		OnExit: func(code int, err error) {
+			if code == 0 {
+				c.Log.Info("sd-server 已退出")
+				return
+			}
+			msg := ""
+			if err != nil {
+				msg = err.Error()
+			}
+			c.Log.Warn("sd-server 异常退出", "code", code, "error", msg)
+		},
+	}
+}
+
 // Start 启动后台循环（指标采样、引擎健康巡检、空闲卸载）。
 func (c *Core) Start() {
 	snap := c.Cfg.Snapshot()
@@ -159,6 +194,12 @@ func (c *Core) Start() {
 func (c *Core) Stop() {
 	c.cancel()
 	c.wg.Wait()
+	// 生图引擎是独立子进程，主程序退出时必须一并关掉，避免残留占用显存/端口。
+	if c.sd != nil {
+		if err := c.sd.Stop(context.Background()); err != nil {
+			c.Log.Warn("停止生图引擎失败", "error", err)
+		}
+	}
 }
 
 func (c *Core) loop() {
@@ -950,6 +991,8 @@ func (c *Core) LoadModelWith(ctx context.Context, id string, ctxLen int, overrid
 			Type: "llm",
 		}
 	}
+	// 显存避让：若生图引擎正在占用显存，先停掉再加载文本模型（8GB 卡两者不能同时进显存）。
+	c.EnsureSDStopped(ctx)
 	if err := c.loadEngineModel(ctx, m, ctxLen, override); err != nil {
 		return fmt.Errorf("启动 llama-server 失败：%w", err)
 	}
@@ -1434,6 +1477,9 @@ func (c *Core) RemoveModelRoot(path string) ([]string, error) {
 func (c *Core) applyEngineConfig(snap config.Config) {
 	before := c.llama.Config()
 	c.llama.SetConfig(c.llamaConfig(snap))
+	if c.sd != nil {
+		c.sd.SetConfig(c.imageConfig(snap))
+	}
 
 	if before.ExePath != snap.Engine.ExePath ||
 		!sameStrings(before.RuntimeDirs, snap.Engine.RuntimeDirs) {

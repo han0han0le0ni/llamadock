@@ -57,6 +57,27 @@ type EngineConfig struct {
 	KeepAlive   bool     `json:"keep_alive"`   // 空闲时保持常驻（false=按 idle_unload_minutes 卸载）
 }
 
+// ImageConfig 生图引擎（stable-diffusion.cpp 的 sd-server）配置。
+//
+// 生图与文本是两套完全独立的进程：SD/Flux 走 sd-server，文本走 llama-server。
+// 8GB 显存下两者不能同时进显存，因此提供 UnloadLLM 开关在生图前腾出显存。
+// 该引擎完全可选：ExePath 为空时所有生图接口返回明确错误，不影响文本功能。
+type ImageConfig struct {
+	Enabled       bool    `json:"enabled"`           // 是否启用生图功能
+	ExePath       string  `json:"exe_path"`          // sd-server.exe 路径（留空则自动探测）
+	ModelDir      string  `json:"model_dir"`         // 生图模型目录（gguf / safetensors）
+	ModelPath     string  `json:"model_path"`        // 当前选用的主模型（绝对路径）
+	ExtraArgs     string  `json:"extra_args"`        // 额外启动参数（Flux/Z-Image 多组件用，原样拼到命令行）
+	Port          int     `json:"port"`              // 引擎监听端口，默认 1234
+	Backend       string  `json:"backend"`           // cuda | vulkan | cpu，默认 cuda
+	OffloadToCPU  bool    `json:"offload_to_cpu"`    // 权重留内存按需进显存，省显存
+	UnloadLLM     bool    `json:"unload_llm"`        // 生图前卸载文本模型释放显存
+	DefaultWidth  int     `json:"default_width"`     // 默认出图宽
+	DefaultHeight int     `json:"default_height"`    // 默认出图高
+	DefaultSteps  int     `json:"default_steps"`     // 默认采样步数
+	DefaultCfg    float64 `json:"default_cfg_scale"` // 默认 CFG
+}
+
 // UIConfig 界面与桌面行为。
 type UIConfig struct {
 	Theme          string `json:"theme"` // dark | light
@@ -107,6 +128,7 @@ type Config struct {
 	FirstRunDone  bool                     `json:"first_run_done"`
 	Server        ServerConfig             `json:"server"`
 	Engine        EngineConfig             `json:"engine"`
+	Image         ImageConfig              `json:"image,omitempty"`
 	UI            UIConfig                 `json:"ui"`
 	Params        map[string]any           `json:"params"` // 全局默认参数（params 注册表的取值）
 	Presets       []Preset                 `json:"presets"`
@@ -148,6 +170,17 @@ func Default() Config {
 			AutoLoad:   true,
 			AutoDetect: true,
 			KeepAlive:  false,
+		},
+		Image: ImageConfig{
+			Enabled:       false,
+			Port:          1234,
+			Backend:       "cuda",
+			OffloadToCPU:  true,
+			UnloadLLM:     true,
+			DefaultWidth:  512,
+			DefaultHeight: 512,
+			DefaultSteps:  25,
+			DefaultCfg:    7.0,
 		},
 		UI: UIConfig{
 			Theme:          "dark",
@@ -311,6 +344,25 @@ func (m *Manager) migrate(c *Config) {
 	}
 	if c.Engine.PortMax == 0 {
 		c.Engine.PortMax = def.Engine.PortMax
+	}
+	// 生图配置：老配置没有该段（Port==0）时整体补默认值，不动用户已有设置。
+	if c.Image.Port == 0 {
+		c.Image = def.Image
+	}
+	if c.Image.Backend == "" {
+		c.Image.Backend = def.Image.Backend
+	}
+	if c.Image.DefaultWidth == 0 {
+		c.Image.DefaultWidth = def.Image.DefaultWidth
+	}
+	if c.Image.DefaultHeight == 0 {
+		c.Image.DefaultHeight = def.Image.DefaultHeight
+	}
+	if c.Image.DefaultSteps == 0 {
+		c.Image.DefaultSteps = def.Image.DefaultSteps
+	}
+	if c.Image.DefaultCfg == 0 {
+		c.Image.DefaultCfg = def.Image.DefaultCfg
 	}
 	if c.UI.Theme == "" {
 		c.UI.Theme = def.UI.Theme

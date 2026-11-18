@@ -1,0 +1,25 @@
+# 构建产物
+/build/
+*.exe
+llamadock.exe
+llamadock-desktop.exe
+*.log
+*.out.log
+*.err.log
+shot-*.png
+t*.json
+run*.log
+
+# 前端
+frontend/node_modules/
+internal/webui/dist/assets/
+frontend/dist/
+
+# Go
+/vendor/
+
+# 本地数据
+*.db
+
+# WorkBuddy 项目元数据（含工作日志，不属于源码）
+/.workbuddy/

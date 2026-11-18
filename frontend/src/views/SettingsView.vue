@@ -1,0 +1,830 @@
+<script setup>
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { api } from '../api'
+import { chatTemplates, findTemplate } from '../chatTemplates'
+import {
+  state,
+  notify,
+  refreshConfig,
+  refreshParams,
+  refreshStatus,
+  refreshEngineDetail,
+  refreshModelRoots,
+  engineLabel,
+} from '../store'
+
+const form = reactive({
+  host: '',
+  port: 8080,
+  autoStart: true,
+  normalizeMessages: true,
+  theme: 'dark',
+  minimizeToTray: true,
+  openBrowser: true,
+  logLevel: 'info',
+})
+// 引擎配置（对应 config.engine）
+const eng = reactive({
+  exe_path: '',
+  host: '127.0.0.1',
+  port_min: 10001,
+  port_max: 10099,
+  auto_load: true,
+  auto_detect: true,
+  keep_alive: false,
+})
+// 运行时搜索目录：用多行文本编辑，保存时按行拆开
+const runtimeDirsText = ref('')
+const svc = reactive({
+  max_concurrent_requests: 4,
+  request_timeout: 300,
+  queue_policy: 'queue',
+  allow_auto_load: true,
+  idle_unload_minutes: 30,
+  vram_reserve_mb: 512,
+  advisor_conservative: 1.0,
+})
+// 模型名 → Chat 模板自动套用规则
+const tplAuto = reactive({
+  enabled: true,
+  rules: [], // 每项：{ pattern, template_id, mode, text, label }
+})
+
+const saving = ref(false)
+const detecting = ref(false)
+const newRoot = ref('')
+
+// 一键安装 llama-server：后台任务 + 轮询进度
+const installVariant = ref('auto')
+const installState = ref(null)
+const installVariants = ref(['auto', 'cuda-13.4', 'cuda-12.4', 'vulkan', 'cpu'])
+let installTimer = null
+
+const installing = computed(() => !!(installState.value && installState.value.running))
+
+const variantLabel = {
+  auto: '自动（按硬件选择）',
+  'cuda-13.4': 'CUDA 13.4（N 卡最快）',
+  'cuda-12.4': 'CUDA 12.4',
+  vulkan: 'Vulkan（体积小，通用）',
+  cpu: 'CPU（不占显卡）',
+}
+
+const cfg = computed(() => state.config)
+const st = computed(() => state.status)
+const detail = computed(() => state.engineDetail)
+const runtimes = computed(() => (detail.value && detail.value.runtimes) || [])
+const roots = computed(() => {
+  if (state.modelRoots && state.modelRoots.length) return state.modelRoots
+  const c = cfg.value
+  return (c && c.model_roots) || []
+})
+
+watch(
+  cfg,
+  (c) => {
+    if (!c) return
+    form.host = c.server.host
+    form.port = c.server.port
+    form.autoStart = c.server.auto_start_gateway
+    // 后端指针字段：undefined/null 表示默认开启，只有显式 false 才关闭
+    form.normalizeMessages = c.server.normalize_messages !== false
+    form.theme = c.ui.theme
+    form.minimizeToTray = c.ui.minimize_to_tray
+    form.openBrowser = c.ui.open_browser
+    form.logLevel = c.ui.log_level
+
+    const e = c.engine || {}
+    eng.exe_path = e.exe_path || ''
+    eng.host = e.host || '127.0.0.1'
+    eng.port_min = e.port_min || 10001
+    eng.port_max = e.port_max || 10099
+    eng.auto_load = e.auto_load !== false
+    eng.auto_detect = e.auto_detect !== false
+    eng.keep_alive = !!e.keep_alive
+    runtimeDirsText.value = (e.runtime_dirs || []).join('\n')
+
+    // 模板自动映射：mode/text 优先匹配内置模板 id 供下拉回显，匹配不到记为自定义
+    tplAuto.enabled = c.template_auto_enabled !== false
+    tplAuto.rules = (c.template_auto_map || []).map((r) => ({
+      pattern: r.pattern || '',
+      template_id: matchTemplateId(r.mode, r.text, r.label),
+      mode: r.mode || 'jinja',
+      text: r.text || '',
+      label: r.label || '',
+    }))
+  },
+  { immediate: true },
+)
+
+// 反查内置模板 id 用于下拉回显：先按 mode+text 精确匹配，再按 label 匹配（兼容后端正文的转义差异）。
+// 找不到返回 '__custom__'（保留原文本，功能不受影响）。
+function matchTemplateId(mode, text, label) {
+  let t = chatTemplates.find((x) => x.mode === mode && x.text === text)
+  if (!t && label) {
+    const short = String(label).split(' · ')[0]
+    t = chatTemplates.find((x) => x.label.split(' · ')[0] === short)
+  }
+  return t ? t.id : '__custom__'
+}
+
+watch(
+  () => state.params,
+  (p) => {
+    if (!p) return
+    Object.keys(svc).forEach((k) => {
+      if (p.values[k] !== undefined) svc[k] = p.values[k]
+    })
+  },
+  { immediate: true },
+)
+
+function parseDirs(text) {
+  return text
+    .split('\n')
+    .map((s) => s.trim().replace(/^"|"$/g, ''))
+    .filter(Boolean)
+}
+
+function enginePatch() {
+  return {
+    exe_path: eng.exe_path.trim(),
+    runtime_dirs: parseDirs(runtimeDirsText.value),
+    host: eng.host.trim() || '127.0.0.1',
+    port_min: Number(eng.port_min) || 10001,
+    port_max: Number(eng.port_max) || 10099,
+    auto_load: !!eng.auto_load,
+    auto_detect: !!eng.auto_detect,
+    keep_alive: !!eng.keep_alive,
+  }
+}
+
+async function reloadEngineState() {
+  await refreshConfig()
+  await refreshEngineDetail()
+  await refreshStatus()
+}
+
+async function saveEngine() {
+  saving.value = true
+  try {
+    state.config = await api.saveConfig({ engine: enginePatch() })
+    const list = (await api.detectRuntimes().catch(() => ({ runtimes: [] }))).runtimes || []
+    await reloadEngineState()
+    if (!list.length) {
+      notify(
+        '已保存，但仍没找到 llama-server.exe：请到下面的「探测到的运行时」说明里看怎么放一份自带运行时',
+        'warn',
+        8000,
+      )
+    } else {
+      const cur = list.find((r) => r.current) || list[0]
+      notify(`已保存引擎设置，将使用 ${cur.variant} 运行时（${cur.exe}）`, 'ok', 6000)
+    }
+  } catch (e) {
+    notify(e.message, 'err', 6000)
+  } finally {
+    saving.value = false
+  }
+}
+
+async function rescan() {
+  try {
+    const info = await api.rescanEngine()
+    await refreshEngineDetail()
+    await reloadEngineState()
+    const h = info.health || {}
+    notify(
+      h.running
+        ? `llama-server 运行中：PID ${h.pid}${h.port ? ' · 端口 ' + h.port : ''}${h.variant ? ' · ' + h.variant : ''}`
+        : 'llama-server 未运行（尚未加载模型，或已被空闲卸载）',
+      h.running ? 'ok' : 'warn',
+      6000,
+    )
+    state.models = (await api.models()) || []
+  } catch (e) {
+    notify(e.message, 'err', 6000)
+  }
+}
+
+async function detectRuntimes() {
+  detecting.value = true
+  try {
+    const list = (await api.detectRuntimes()).runtimes || []
+    await refreshEngineDetail()
+    notify(
+      list.length ? `发现 ${list.length} 个 llama-server 运行时` : '没有找到 llama-server.exe，看下面的说明',
+      list.length ? 'ok' : 'warn',
+      6000,
+    )
+  } catch (e) {
+    notify(e.message, 'err', 6000)
+  } finally {
+    detecting.value = false
+  }
+}
+
+function useRuntime(rt) {
+  eng.exe_path = rt.exe
+  notify('已填入该运行时路径，点「保存引擎设置」生效', 'info', 4000)
+}
+
+async function addRoot() {
+  const p = newRoot.value.trim()
+  if (!p) return
+  try {
+    const r = await api.addModelRoot(p)
+    state.modelRoots = r.roots || []
+    newRoot.value = ''
+    state.config = await api.config()
+    state.models = (await api.models()) || []
+    notify(`已添加模型根目录（当前 ${state.models.length} 个模型）`, 'ok', 4000)
+  } catch (e) {
+    notify(e.message, 'err', 6000)
+  }
+}
+
+async function dropRoot(path) {
+  try {
+    const r = await api.removeModelRoot(path)
+    state.modelRoots = r.roots || []
+    state.config = await api.config()
+    state.models = (await api.models()) || []
+    notify('已移除（磁盘上的文件未删除）', 'ok', 4000)
+  } catch (e) {
+    notify(e.message, 'err', 6000)
+  }
+}
+
+async function saveService() {
+  saving.value = true
+  try {
+    state.config = await api.saveConfig({
+      server: {
+        host: form.host,
+        port: Number(form.port),
+        auto_start_gateway: form.autoStart,
+        normalize_messages: form.normalizeMessages,
+      },
+      ui: {
+        theme: form.theme,
+        minimize_to_tray: form.minimizeToTray,
+        open_browser: form.openBrowser,
+        log_level: form.logLevel,
+      },
+    })
+    await api.saveParams({ ...svc, advisor_conservative: Number(svc.advisor_conservative) })
+    state.params = await api.params()
+    notify('设置已保存（监听地址/端口变更需重启网关或程序后生效）', 'ok', 4200)
+    await refreshStatus()
+  } catch (e) {
+    notify(e.message, 'err', 6000)
+  } finally {
+    saving.value = false
+  }
+}
+
+// —— 模型名 → 模板自动映射 ——
+// 默认规则只存「关键字 + 模板 id」，正文从 chatTemplates 取，避免与后端模板正文漂移。
+// 顺序与后端 config.DefaultTemplateAutoMap 一致（具体在前）。
+const defaultRuleSpecs = [
+  { pattern: 'qwen', template_id: 'qwen25' },
+  { pattern: 'llama-3', template_id: 'llama3' },
+  { pattern: 'llama3', template_id: 'llama3' },
+  { pattern: 'gemma', template_id: 'gemma' },
+  { pattern: 'chatml', template_id: 'chatml' },
+  { pattern: 'openchat', template_id: 'chatml' },
+]
+
+function restoreDefaultRules() {
+  tplAuto.rules = defaultRuleSpecs.map((s) => {
+    const r = { pattern: s.pattern, template_id: s.template_id, mode: 'jinja', text: '', label: '' }
+    onTplRulePick(r, s.template_id)
+    return r
+  })
+  notify('已载入默认规则，记得点「保存映射规则」', 'info', 3500)
+}
+
+function addTplRule() {
+  tplAuto.rules.push({ pattern: '', template_id: 'loose', mode: 'jinja', text: '', label: '' })
+}
+
+function removeTplRule(i) {
+  tplAuto.rules.splice(i, 1)
+}
+
+// 下拉选择内置模板时，把 mode/text/label 同步进规则；自定义项保留原值
+function onTplRulePick(rule, id) {
+  rule.template_id = id
+  if (id === '__custom__') return
+  const t = findTemplate(id)
+  if (!t) return
+  rule.mode = t.mode
+  rule.text = t.text
+  rule.label = t.label.split(' · ')[0]
+}
+
+async function saveTemplateAuto() {
+  saving.value = true
+  try {
+    // 校验：pattern 不能为空，且必须选了有效模板（有正文或 auto）
+    const rules = []
+    for (const r of tplAuto.rules) {
+      const pattern = (r.pattern || '').trim().toLowerCase()
+      if (!pattern) continue
+      if (r.mode === 'auto') {
+        rules.push({ pattern, mode: 'auto', text: '', label: r.label || '模型自带模板' })
+        continue
+      }
+      if (!r.text || !r.text.trim()) continue
+      rules.push({ pattern, mode: r.mode, text: r.text, label: r.label || '' })
+    }
+    state.config = await api.saveConfig({
+      template_auto_enabled: !!tplAuto.enabled,
+      template_auto_map: rules,
+    })
+    await refreshConfig()
+    notify(`已保存 ${rules.length} 条模板映射规则（下次加载模型时生效）`, 'ok', 4200)
+  } catch (e) {
+    notify(e.message, 'err', 6000)
+  } finally {
+    saving.value = false
+  }
+}
+
+// —— 原生选择框：对话框开在运行本程序的机器上 ——
+async function browseModelRoot() {
+  try {
+    const r = await api.pickFolder('选择存放 .gguf 模型的文件夹', newRoot.value)
+    if (r && r.path) {
+      newRoot.value = r.path
+      await addRoot() // 选完即加，少点一次
+    }
+  } catch (e) {
+    notify(e.message, 'err', 6000)
+  }
+}
+
+async function browseExe() {
+  try {
+    const init = eng.exe_path ? eng.exe_path.replace(/[\\/][^\\/]*$/, '') : ''
+    const r = await api.pickFile('选择 llama-server.exe', init, '可执行文件 (*.exe)|*.exe|所有文件 (*.*)|*.*')
+    if (r && r.path) eng.exe_path = r.path
+  } catch (e) {
+    notify(e.message, 'err', 6000)
+  }
+}
+
+async function browseRuntimeDir() {
+  try {
+    const r = await api.pickFolder('选择 llama.cpp 运行时目录', '')
+    if (r && r.path) {
+      const cur = runtimeDirsText.value.trim()
+      runtimeDirsText.value = cur ? cur + '\n' + r.path : r.path
+    }
+  } catch (e) {
+    notify(e.message, 'err', 6000)
+  }
+}
+
+// —— 一键安装 ——
+async function refreshInstall() {
+  try {
+    const r = await api.engineInstallState()
+    installState.value = r.state
+    if (r.variants && r.variants.length) installVariants.value = r.variants
+    if (r.state && r.state.running) ensureInstallPoll()
+    else stopInstallPoll()
+  } catch (e) {
+    /* 静默：安装状态不是主流程 */
+  }
+}
+
+function ensureInstallPoll() {
+  if (installTimer) return
+  installTimer = setInterval(refreshInstall, 1000)
+}
+
+function stopInstallPoll() {
+  if (installTimer) {
+    clearInterval(installTimer)
+    installTimer = null
+  }
+}
+
+async function installLlama() {
+  try {
+    installState.value = await api.installEngine(installVariant.value)
+    ensureInstallPoll()
+    notify('已开始下载安装 llama-server（后台进行，可切到别的页面）', 'info', 6000)
+  } catch (e) {
+    notify(e.message, 'err', 7000)
+  }
+}
+
+// 安装完成后刷新一次运行时列表，让「探测到的运行时」立刻出现新装的这份
+watch(
+  () => installState.value && installState.value.stage,
+  async (stage, prev) => {
+    if (stage === 'done' && prev !== 'done') {
+      await reloadEngineState()
+      await detectRuntimes()
+      state.models = (await api.models()) || []
+    }
+  },
+)
+
+onMounted(async () => {
+  await refreshConfig()
+  await refreshParams()
+  await refreshEngineDetail()
+  await refreshModelRoots()
+  await refreshInstall()
+})
+
+onUnmounted(stopInstallPoll)
+</script>
+
+<template>
+  <div class="grid cols-2" style="gap: 16px">
+    <!-- 保存分区说明：设置分两类，各有就近的保存按钮 -->
+    <div class="card tight" style="grid-column: 1 / -1; border-color: var(--accent)">
+      <div class="hint" style="color: var(--text-dim)">
+        <b>关于保存</b>　设置分两类，改完点所在卡片内的按钮即可生效：
+        <span class="badge info">推理引擎</span> 用「保存引擎设置」；
+        <span class="badge">网关 · 界面 · 推荐参数</span> 用各自卡片内的「保存…」按钮（会被一起写入）。
+        引擎配置与其它设置分开保存，请勿混淆。
+      </div>
+    </div>
+
+    <!-- 引擎：这是整个程序的心脏，自己拉起 llama-server -->
+    <div class="card" style="grid-column: 1 / -1">
+      <div class="card-head">
+        <h3>推理引擎</h3>
+        <div class="spacer"></div>
+        <span class="badge info">自管 · 可调度</span>
+        <span class="badge" :class="st && st.engine.health.online ? 'ok' : 'err'">
+          {{ st && st.engine.health.online ? '运行中' : '未运行' }}
+        </span>
+        <button class="sm" @click="rescan">重新探测</button>
+      </div>
+
+      <div class="grid cols-2" style="gap: 12px">
+        <label class="field">
+          <span>llama-server.exe 路径（留空则从下面的探测结果里自动择优）</span>
+          <div class="row" style="gap: 6px">
+            <input v-model="eng.exe_path" placeholder="例如 D:\\llama.cpp\\llama-server.exe" style="flex: 1" />
+            <button class="sm" type="button" @click="browseExe">浏览…</button>
+          </div>
+        </label>
+        <label class="field">
+          <span>监听地址（只绑回环，局域网不可见）</span>
+          <input v-model="eng.host" placeholder="127.0.0.1" />
+        </label>
+      </div>
+
+      <div class="grid cols-2" style="gap: 12px">
+        <label class="field">
+          <span>端口池下界</span>
+          <input type="number" v-model.number="eng.port_min" />
+        </label>
+        <label class="field">
+          <span>端口池上界（每次加载从中挑一个空闲端口，仅本机可访问）</span>
+          <input type="number" v-model.number="eng.port_max" />
+        </label>
+      </div>
+
+      <label class="field">
+        <span>额外的运行时搜索目录（每行一个，递归找 llama-server.exe）</span>
+        <textarea v-model="runtimeDirsText" rows="2" placeholder="例如&#10;D:\\llama.cpp\\build\\bin"></textarea>
+        <button class="sm" type="button" style="align-self: flex-start" @click="browseRuntimeDir">浏览并添加目录…</button>
+      </label>
+
+      <div class="grid cols-3" style="gap: 12px">
+        <label class="row" style="gap: 8px; align-items: center">
+          <input type="checkbox" v-model="eng.auto_load" style="width: auto" />
+          <span class="hint">请求未加载模型时自动拉起</span>
+        </label>
+        <label class="row" style="gap: 8px; align-items: center">
+          <input type="checkbox" v-model="eng.auto_detect" style="width: auto" />
+          <span class="hint">启动时探测运行时与模型</span>
+        </label>
+        <label class="row" style="gap: 8px; align-items: center">
+          <input type="checkbox" v-model="eng.keep_alive" style="width: auto" />
+          <span class="hint">空闲也常驻（否则按网关的空闲卸载分钟数停掉）</span>
+        </label>
+      </div>
+
+      <div class="row" style="margin-top: 12px">
+        <button class="primary" :disabled="saving" @click="saveEngine">保存引擎设置</button>
+        <button :disabled="detecting" @click="detectRuntimes">
+          {{ detecting ? '探测中…' : '重新探测 llama-server' }}
+        </button>
+      </div>
+
+      <!-- 一键安装：官方 release → 运行时目录，装完自动写回 exe 路径 -->
+      <div class="card tight" style="margin-top: 14px">
+        <div class="card-head">
+          <h3 style="font-size: 14px">一键安装 llama-server</h3>
+          <div class="spacer"></div>
+          <span class="badge" :class="installing ? 'info' : ''">{{ installing ? '进行中' : '空闲' }}</span>
+        </div>
+        <div class="hint" style="margin-bottom: 8px">
+          从官方 GitHub Release 下载 Windows 构建并解压到
+          <span class="mono">{{ (detail && detail.default_dir) || 'runtime\\llama.cpp' }}</span>，
+          完成后自动写入上面的引擎路径。选 CUDA 会连同 cudart 运行库一起装。
+        </div>
+        <div class="row wrap" style="gap: 8px">
+          <select v-model="installVariant" style="max-width: 220px" :disabled="installing">
+            <option v-for="v in installVariants" :key="v" :value="v">{{ variantLabel[v] || v }}</option>
+          </select>
+          <button class="primary sm" :disabled="installing" @click="installLlama">
+            {{ installing ? '安装中…' : '下载并安装' }}
+          </button>
+        </div>
+
+        <div v-if="installState && (installState.running || installState.stage)" style="margin-top: 10px">
+          <div class="bar">
+            <i class="used" :style="{ width: (installState.percent || 0) + '%' }"></i>
+          </div>
+          <div
+            class="hint"
+            style="margin-top: 6px"
+            :style="installState.stage === 'error' ? 'color:var(--err-text)' : installState.stage === 'done' ? 'color:var(--ok-text)' : ''"
+          >
+            {{ installState.message || installState.stage }}
+            <span v-if="installState.tag" class="mono">
+              · {{ installState.tag }}{{ installState.variant ? ' / ' + installState.variant : '' }}
+            </span>
+          </div>
+          <div v-if="installState.exe_path" class="hint mono" style="margin-top: 4px; word-break: break-all">
+            {{ installState.exe_path }}
+          </div>
+        </div>
+      </div>
+
+      <div class="card tight" style="margin-top: 14px">
+        <div class="card-head">
+          <h3 style="font-size: 14px">探测到的运行时</h3>
+          <div class="spacer"></div>
+          <span class="badge">{{ runtimes.length }} 个</span>
+        </div>
+        <div v-if="!runtimes.length" class="hint">
+          没有找到 llama-server.exe。把官方 llama.cpp 的 Windows 压缩包解压到
+          <span class="mono">{{ (detail && detail.default_dir) || '程序目录\\runtime\\llama.cpp' }}</span>
+          即可，本程序会自动发现（也可以在上面直接填 exe 路径，或加进系统 PATH）。
+        </div>
+        <div v-else class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>变体</th>
+                <th>版本</th>
+                <th>来源</th>
+                <th>路径</th>
+                <th style="width: 110px">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="rt in runtimes" :key="rt.exe">
+                <td>
+                  <span class="badge" :class="rt.gpu ? 'ok' : ''">{{ rt.variant }}</span>
+                  <span v-if="rt.current" class="badge info">当前</span>
+                </td>
+                <td class="mono hint">{{ rt.version || '—' }}</td>
+                <td class="hint">{{ rt.source || '—' }}</td>
+                <td class="mono hint" style="word-break: break-all">{{ rt.exe }}</td>
+                <td><button class="sm" @click="useRuntime(rt)">使用</button></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="hint" style="margin-top: 8px">
+          变体优先级由硬件决定：有 N 卡用 <span class="mono">cuda</span>，否则 <span class="mono">vulkan</span>，
+          再否则 <span class="mono">cpu</span>。探测结果里的第一个就是会被使用的那个。
+        </div>
+      </div>
+    </div>
+
+    <!-- 模型根目录 -->
+    <div class="card">
+      <div class="card-head">
+        <h3>模型根目录（gguf 库）</h3>
+        <div class="spacer"></div>
+        <span class="badge">{{ roots.length }} 个</span>
+      </div>
+      <div v-if="!roots.length" class="hint">还没有根目录，添加一个存放 .gguf 的文件夹即可。</div>
+      <div v-for="r in roots" :key="r" class="row" style="gap: 8px; margin-bottom: 6px">
+        <span class="mono hint" style="flex: 1; word-break: break-all">{{ r }}</span>
+        <button class="sm ghost" @click="dropRoot(r)">移除</button>
+      </div>
+      <div class="row" style="margin-top: 10px; gap: 6px">
+        <input v-model="newRoot" placeholder="例如 E:\\Models" style="flex: 1" @keyup.enter="addRoot" />
+        <button class="sm" @click="browseModelRoot">浏览…</button>
+        <button class="sm" @click="addRoot">添加</button>
+      </div>
+      <div class="hint" style="margin-top: 8px">
+        目录不存在会自动创建；移除只从列表里去掉，磁盘上的模型文件不动。本程序扫描这些目录下的 gguf。
+      </div>
+    </div>
+
+    <!-- 参数推荐 -->
+    <div class="card">
+      <div class="card-head"><h3>参数推荐</h3></div>
+      <label class="field">
+        <span>保守系数（显存预估算 × 该系数，1.15 更稳）</span>
+        <input type="number" step="0.01" min="1" max="1.5" v-model.number="svc.advisor_conservative" />
+      </label>
+      <label class="field">
+        <span>显存安全余量（MB）</span>
+        <input type="number" step="64" v-model.number="svc.vram_reserve_mb" />
+      </label>
+      <div class="hint">
+        推荐引擎是纯确定性算术（无 AI）：同一台机器 + 同一个模型永远得到同一组推荐值，且每条都给出算式依据。
+      </div>
+      <div class="row" style="margin-top: 12px">
+        <button class="sm primary" :disabled="saving" @click="saveService">
+          {{ saving ? '保存中…' : '保存推荐设置' }}
+        </button>
+      </div>
+    </div>
+
+    <!-- 模型名 → Chat 模板自动套用 -->
+    <div class="card" style="grid-column: 1 / -1">
+      <div class="card-head">
+        <h3>模型名自动套用 Chat 模板</h3>
+        <div class="spacer"></div>
+        <label class="row" style="gap: 6px; margin-right: 10px">
+          <input type="checkbox" v-model="tplAuto.enabled" style="width: auto" />
+          <span class="hint">启用自动套用</span>
+        </label>
+        <button class="sm primary" :disabled="saving" @click="saveTemplateAuto">
+          {{ saving ? '保存中…' : '保存映射规则' }}
+        </button>
+      </div>
+      <div class="hint" style="margin-bottom: 10px">
+        加载模型时，若你<strong>没有</strong>手动指定模板（参数页仍为 auto 且模板为空），程序会按下面的规则自动套用对应模板，
+        省去逐个模型手动切换。匹配用模型名关键字（不区分大小写的子串）；<b>自上而下首条命中生效</b>，越具体的规则越靠前。
+        优先级：<b>手动指定 &gt; 自动映射 &gt; 模型自带模板</b>。规则在下次加载模型时生效。
+      </div>
+
+      <div v-if="!tplAuto.rules.length" class="empty" style="margin: 6px 0">
+        暂无规则。已内置常见模型族（Qwen / Llama 3 / Gemma / ChatML）的默认规则；若这里为空，点右侧「恢复默认规则」可重新载入。
+      </div>
+
+      <div v-for="(r, i) in tplAuto.rules" :key="i" class="row wrap" style="gap: 8px; margin-bottom: 8px">
+        <span class="badge">{{ i + 1 }}</span>
+        <input
+          v-model="r.pattern"
+          placeholder="模型名关键字，如 qwen2.5 / llama-3 / gemma"
+          style="max-width: 320px; flex: 1 1 260px"
+        />
+        <span class="hint">→</span>
+        <select
+          :value="r.template_id"
+          style="max-width: 260px; flex: 1 1 220px"
+          @change="onTplRulePick(r, $event.target.value)"
+        >
+          <option v-for="t in chatTemplates" :key="t.id" :value="t.id">{{ t.label }}</option>
+          <option value="__custom__">自定义（保留下方文本）</option>
+        </select>
+        <button class="sm" :disabled="saving" @click="removeTplRule(i)">删除</button>
+      </div>
+
+      <div class="row wrap" style="gap: 8px; margin-top: 10px">
+        <button class="sm" :disabled="saving" @click="addTplRule">+ 添加规则</button>
+        <button class="sm" :disabled="saving" @click="restoreDefaultRules">
+          恢复默认规则
+        </button>
+        <div class="spacer"></div>
+        <span class="hint">「通用宽松」模板报错概率最低，适合拿不准的模型兜底。</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h3>局域网网关</h3></div>
+      <div class="grid cols-2" style="gap: 12px">
+        <label class="field">
+          <span>监听地址（0.0.0.0 = 局域网可访问）</span>
+          <input v-model="form.host" />
+        </label>
+        <label class="field">
+          <span>端口</span>
+          <input type="number" v-model.number="form.port" />
+        </label>
+      </div>
+      <div class="grid cols-2" style="gap: 12px">
+        <label class="field">
+          <span>最大并发请求</span>
+          <input type="number" v-model.number="svc.max_concurrent_requests" />
+        </label>
+        <label class="field">
+          <span>请求超时（秒）</span>
+          <input type="number" v-model.number="svc.request_timeout" />
+        </label>
+      </div>
+      <div class="grid cols-2" style="gap: 12px">
+        <label class="field">
+          <span>并发满时策略</span>
+          <select v-model="svc.queue_policy">
+            <option value="queue">排队等待</option>
+            <option value="reject">直接拒绝</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>空闲自动卸载（分钟，0=不卸载）</span>
+          <input type="number" v-model.number="svc.idle_unload_minutes" />
+        </label>
+      </div>
+      <label class="row" style="gap: 8px; margin-bottom: 8px">
+        <input type="checkbox" v-model="form.autoStart" style="width: auto" />
+        <span class="hint">程序启动时自动开启网关</span>
+      </label>
+      <label class="row" style="gap: 8px; margin-bottom: 8px">
+        <input type="checkbox" v-model="form.normalizeMessages" style="width: auto" />
+        <span class="hint">规范化消息顺序：把 system 提到首位（兼容 Llama3/Qwen 严格模板，建议开启）</span>
+      </label>
+      <label class="row" style="gap: 8px">
+        <input type="checkbox" v-model="svc.allow_auto_load" style="width: auto" />
+        <span class="hint">允许按需自动加载（客户端请求未加载模型时）</span>
+      </label>
+      <div class="row" style="margin-top: 12px">
+        <button class="sm primary" :disabled="saving" @click="saveService">
+          {{ saving ? '保存中…' : '保存网关设置' }}
+        </button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h3>界面与运行</h3></div>
+      <div class="grid cols-2" style="gap: 12px">
+        <label class="field">
+          <span>主题</span>
+          <select v-model="form.theme">
+            <option value="dark">深色</option>
+            <option value="light">浅色</option>
+          </select>
+          <div class="hint" style="margin-top: 4px">切换后立即生效（保存后应用）</div>
+        </label>
+        <label class="field">
+          <span>日志级别</span>
+          <select v-model="form.logLevel">
+            <option value="debug">debug</option>
+            <option value="info">info</option>
+            <option value="warn">warn</option>
+            <option value="error">error</option>
+          </select>
+        </label>
+      </div>
+      <label class="row" style="gap: 8px; margin-bottom: 8px">
+        <input type="checkbox" v-model="form.minimizeToTray" style="width: auto" />
+        <span class="hint">关闭窗口时最小化到托盘（桌面版）</span>
+      </label>
+      <label class="row" style="gap: 8px">
+        <input type="checkbox" v-model="form.openBrowser" style="width: auto" />
+        <span class="hint">headless 模式下自动打开浏览器管理台</span>
+      </label>
+      <div class="row" style="margin-top: 12px">
+        <button class="sm primary" :disabled="saving" @click="saveService">
+          {{ saving ? '保存中…' : '保存界面设置' }}
+        </button>
+      </div>
+    </div>
+
+    <div class="card" style="grid-column: 1 / -1">
+      <div class="card-head">
+        <h3>信息</h3>
+        <div class="spacer"></div>
+        <button class="sm" :disabled="saving" @click="saveService">
+          {{ saving ? '保存中…' : '保存网关 / 界面 / 参数' }}
+        </button>
+      </div>
+      <div class="grid cols-3">
+        <div>
+          <div class="hint">引擎</div>
+          <div class="mono">{{ engineLabel }}（本程序自管）</div>
+        </div>
+        <div>
+          <div class="hint">版本</div>
+          <div class="mono">{{ st ? st.version : '—' }}</div>
+        </div>
+        <div>
+          <div class="hint">参数总数</div>
+          <div class="mono">{{ st ? st.params_count : '—' }}</div>
+        </div>
+        <div>
+          <div class="hint">管理口</div>
+          <div class="mono">{{ st ? st.admin_addr : '—' }}</div>
+        </div>
+        <div>
+          <div class="hint">配置文件</div>
+          <div class="mono">%APPDATA%/AIRunner/config.json</div>
+        </div>
+        <div>
+          <div class="hint">日志文件</div>
+          <div class="mono">%APPDATA%/AIRunner/llamadock.log</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>

@@ -1,0 +1,20 @@
+{
+  "name": "llamadock-frontend",
+  "private": true,
+  "version": "2.0.0",
+  "type": "module",
+  "description": "LlamaDock 前端：桌面窗口与本机浏览器管理台共用同一份代码",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "vite": "^6.0.7"
+  }
+}

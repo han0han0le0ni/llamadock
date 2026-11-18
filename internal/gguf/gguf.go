@@ -40,6 +40,123 @@ type Meta struct {
 	// 这是模型"出厂"的模板，含正确的角色标记与结束符，优先于任何手写模板。
 	// 空字符串表示该模型未内嵌模板。
 	ChatTemplate string `json:"chat_template,omitempty"`
+	// Tags 来自 general.tags，是模型发布者声明的能力/用途标签，例如
+	// reasoning、tool-use、function-calling、vision、image-text-to-text 等。
+	Tags []string `json:"tags,omitempty"`
+	// Capabilities 是从 Arch + Tags 归纳出的能力，供前端直接展示。
+	Capabilities []string `json:"capabilities,omitempty"`
+	// MMProj 是同目录自动发现的视觉投影文件路径（仅视觉模型）。
+	MMProj string `json:"mmproj,omitempty"`
+}
+
+// 视觉相关标签：只要在 general.tags 里出现，就认为该模型声明了图文能力。
+var visionTags = map[string]bool{
+	"vision": true, "image-text-to-text": true, "image-text-to-text-generation": true,
+	"visual": true, "vlm": true, "multimodal": true, "image-to-text": true,
+}
+
+// 视觉相关架构：llama.cpp 中这些架构需要 mmproj 视觉塔。
+// qwen35 的部分变体（如 Qwen3.5-9B）在 tags 里声明 image-text-to-text。
+func isVisionArch(arch string) bool {
+	a := strings.ToLower(arch)
+	return a == "qwen3vl" || a == "qwen2vl" || a == "qwen25vl" ||
+		a == "llava" || a == "llava-qwen2" || a == "minicpmv" || a == "gemma3"
+}
+
+// IsVision 判断模型是否具备图文输入能力（架构或标签任一命中）。
+func (m *Meta) IsVision() bool {
+	if m == nil {
+		return false
+	}
+	if isVisionArch(m.Arch) {
+		return true
+	}
+	for _, t := range m.Tags {
+		if visionTags[strings.ToLower(strings.TrimSpace(t))] {
+			return true
+		}
+	}
+	return false
+}
+
+// CapabilitiesOf 从架构与标签归纳出人类可读的能力列表，顺序稳定。
+func CapabilitiesOf(arch string, tags []string) []string {
+	out := []string{}
+	seen := map[string]bool{}
+	add := func(s string) {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	lower := map[string]bool{}
+	for _, t := range tags {
+		lower[strings.ToLower(strings.TrimSpace(t))] = true
+	}
+	if isVisionArch(arch) || hasAny(lower, visionTags) {
+		add("视觉")
+	}
+	if lower["reasoning"] || lower["deepseek-r1"] || lower["qwq"] {
+		add("推理")
+	}
+	if lower["tool-use"] || lower["function-calling"] || lower["tools"] {
+		add("工具调用")
+	}
+	if lower["text-generation"] || lower["text-generation-inference"] || lower["conversational"] {
+		add("文本生成")
+	}
+	if lower["embedding"] || lower["sentence-similarity"] {
+		add("向量")
+	}
+	return out
+}
+
+func hasAny(set, keys map[string]bool) bool {
+	for k := range keys {
+		if set[k] {
+			return true
+		}
+	}
+	return false
+}
+
+// findMMProjInDir 在主模型同目录查找配套的 mmproj-*.gguf。
+// 视觉塔由 llama.cpp 单独加载，主模型 GGUF 里不含这部分权重。
+func findMMProjInDir(modelPath string) string {
+	dir := filepath.Dir(modelPath)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	base := strings.ToLower(strings.TrimSuffix(filepath.Base(modelPath), filepath.Ext(modelPath)))
+	best, bestScore := "", -1
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		lower := strings.ToLower(e.Name())
+		if !strings.HasSuffix(lower, ".gguf") || !strings.Contains(lower, "mmproj") {
+			continue
+		}
+		stem := strings.Trim(strings.ReplaceAll(lower, "mmproj", ""), "-_.")
+		score := commonPrefixLenLocal(stem, base)
+		if score > bestScore {
+			best, bestScore = filepath.Join(dir, e.Name()), score
+		}
+	}
+	return best
+}
+
+func commonPrefixLenLocal(a, b string) int {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	i := 0
+	for i < n && a[i] == b[i] {
+		i++
+	}
+	return i
 }
 
 // KVBytesPerElement 返回量化类型对应的每元素字节数（近似值，用于 KV 显存估算）。
@@ -184,6 +301,14 @@ func Parse(path string) (*Meta, error) {
 		m.Quant = quantFromName(base)
 	}
 	m.ParamsB = estimateParamsB(m, st.Size())
+
+	// general.tags 是字符串数组（LLM 发布者声明的能力/用途标签）。
+	// 读取它用于展示能力徽章与识别视觉模型（如 qwen35 变体靠 image-text-to-text 标记）。
+	m.Tags = stringArray(raw, "general.tags")
+	m.Capabilities = CapabilitiesOf(m.Arch, m.Tags)
+	if m.IsVision() {
+		m.MMProj = findMMProjInDir(path)
+	}
 
 	tensors := tensorCount
 	_ = tensors
@@ -449,6 +574,34 @@ func str(m map[string]any, key string) string {
 		}
 	}
 	return ""
+}
+
+// stringArray 从元数据里取字符串数组（如 general.tags）。
+func stringArray(m map[string]any, key string) []string {
+	v, ok := m[key]
+	if !ok {
+		return nil
+	}
+	switch arr := v.(type) {
+	case []any:
+		out := make([]string, 0, len(arr))
+		for _, item := range arr {
+			if s, ok := item.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case string: // 少数模型用逗号分隔的单字符串
+		parts := strings.Split(arr, ",")
+		out := make([]string, 0, len(parts))
+		for _, p := range parts {
+			if s := strings.TrimSpace(p); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 func intOf(m map[string]any, key string) int {

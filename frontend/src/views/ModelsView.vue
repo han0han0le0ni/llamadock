@@ -69,9 +69,28 @@ function meta(m) {
   return bits.join(' · ') || '元数据不可用'
 }
 
-// 视觉语言模型：llama.cpp 需要额外的 mmproj 文件才能处理图片
+// 视觉语言模型：llama.cpp 需要额外的 mmproj 文件才能处理图片。
+// 后端已从 arch + general.tags 归纳能力（qwen35 的 image-text-to-text 也能识别），
+// 这里优先用后端结果，旧字段仅作兜底。
 function isVlm(m) {
-  return !!(m && (m.type === 'vlm' || /vl|vision/i.test(m.arch || '')))
+  if (!m) return false
+  const caps = (m.meta && m.meta.capabilities) || []
+  if (caps.includes('视觉')) return true
+  const tags = (m.meta && m.meta.tags) || []
+  if (tags.some((t) => /vision|image-text-to-text|multimodal|vlm/i.test(t))) return true
+  return m.type === 'vlm' || /vl|vision/i.test(m.arch || '')
+}
+
+// 模型能力徽章：来自 GGUF general.tags + 架构归纳，与 LM Studio 的 Capabilities 一致。
+function caps(m) {
+  const fromBackend = (m && m.meta && m.meta.capabilities) || []
+  if (fromBackend.length) {
+    return fromBackend.map((c) => ({
+      label: c,
+      cls: c === '视觉' ? 'info' : c === '推理' ? 'warn' : c === '工具调用' ? 'ok' : '',
+    }))
+  }
+  return []
 }
 
 // 模型 GGUF 内嵌的原生对话模板（tokenizer.chat_template）
@@ -428,6 +447,16 @@ onMounted(async () => {
                     记忆 {{ memoryOf(m).count }} 项
                   </span>
                   <span
+                    v-for="c in caps(m)"
+                    :key="c.label"
+                    class="badge"
+                    :class="c.cls"
+                    style="margin-left: 6px"
+                    :title="'能力标签来自模型自带的 general.tags（' + c.label + '）'"
+                  >
+                    {{ c.label }}
+                  </span>
+                  <span
                     v-if="nativeTpl(m)"
                     class="badge ok"
                     style="margin-left: 6px"
@@ -436,12 +465,20 @@ onMounted(async () => {
                     原生模板
                   </span>
                   <span
-                    v-if="isVlm(m)"
+                    v-if="isVlm(m) && !m.meta?.mmproj"
                     class="badge warn"
                     style="margin-left: 6px"
                     title="视觉模型需要配套的 mmproj-*.gguf；把它放在模型同目录会自动识别，或在参数页填写 mmproj 路径"
                   >
-                    视觉模型 · 需 mmproj
+                    视觉 · 需 mmproj
+                  </span>
+                  <span
+                    v-else-if="isVlm(m)"
+                    class="badge ok"
+                    style="margin-left: 6px"
+                    title="已找到配套的 mmproj 视觉投影，可以传图"
+                  >
+                    视觉 · mmproj 就绪
                   </span>
                 </div>
                 <div class="hint mono">{{ m.id }}</div>

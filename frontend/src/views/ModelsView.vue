@@ -17,6 +17,10 @@ const purpose = ref('chat')
 const recoModel = ref('')
 const manualPath = ref('')
 const showReasons = ref(true)
+// 原生模板查看/套用弹窗
+const tplOpen = ref(false)
+const tplModel = ref(null)
+const tplApplying = ref(false)
 
 const models = computed(() => state.models)
 const reco = computed(() => state.recommendation)
@@ -42,6 +46,37 @@ function meta(m) {
   if (m.arch) bits.push(m.arch)
   if (m.max_context_length) bits.push('上限 ' + m.max_context_length + ' ctx')
   return bits.join(' · ') || '元数据不可用'
+}
+
+// 模型 GGUF 内嵌的原生对话模板（tokenizer.chat_template）
+function nativeTpl(m) {
+  return (m && m.meta && m.meta.chat_template) || ''
+}
+function modelShort(m) {
+  return (m && ((m.name || m.id) || '').split(/[\\/]/).pop()) || ''
+}
+
+function openTpl(m) {
+  tplModel.value = m
+  tplOpen.value = true
+}
+
+// 套用某模型的原生模板到全局参数（jinja 模式），下次加载模型生效。
+async function applyNativeTpl() {
+  const tpl = nativeTpl(tplModel.value)
+  if (!tpl) return
+  tplApplying.value = true
+  try {
+    // 原生模板是标准 Jinja，走 jinja 模式；引擎会自动加 --jinja 和 --chat-template。
+    const values = { chat_template_mode: 'jinja', chat_template: tpl }
+    state.params = await api.saveParams(values)
+    notify(`已套用「${modelShort(tplModel.value)}」的原生模板，下次加载模型生效`, 'ok', 4500)
+    tplOpen.value = false
+  } catch (e) {
+    notify(e.message, 'err')
+  } finally {
+    tplApplying.value = false
+  }
 }
 
 function fmtUptime(sec) {
@@ -350,7 +385,7 @@ onMounted(async () => {
               <th>模型</th>
               <th>元数据</th>
               <th>状态</th>
-              <th style="width: 330px">操作</th>
+              <th style="width: 380px">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -365,6 +400,14 @@ onMounted(async () => {
                     title="已记住这个模型调好的参数，加载时自动套用"
                   >
                     记忆 {{ memoryOf(m).count }} 项
+                  </span>
+                  <span
+                    v-if="nativeTpl(m)"
+                    class="badge ok"
+                    style="margin-left: 6px"
+                    title="这个模型自带原生对话模板（GGUF 内嵌），点击查看并套用"
+                  >
+                    原生模板
                   </span>
                 </div>
                 <div class="hint mono">{{ m.id }}</div>
@@ -381,6 +424,7 @@ onMounted(async () => {
                   <button class="sm" :disabled="busy === m.id || !m.loaded" @click="unload(m)">卸载</button>
                   <button class="sm" @click="useModel(m)">设为当前</button>
                   <button class="sm" @click="openMemory(m)">记忆参数</button>
+                  <button v-if="nativeTpl(m)" class="sm ghost" @click="openTpl(m)">原生模板</button>
                   <button
                     class="sm ghost"
                     @click="((recoModel = m.id), (manualPath = m.local_path || ''), recommend())"
@@ -606,6 +650,28 @@ onMounted(async () => {
       </template>
     </div>
   </div>
+
+  <!-- 原生模板查看/套用弹窗：展示 GGUF 内嵌的 tokenizer.chat_template -->
+  <div v-if="tplOpen" class="mem-mask" @click.self="tplOpen = false">
+    <div class="mem-panel tpl-panel">
+      <div class="card-head">
+        <h3>原生对话模板 · {{ modelShort(tplModel) }}</h3>
+        <div class="spacer"></div>
+        <button class="sm ghost" @click="tplOpen = false">关闭</button>
+      </div>
+      <div class="hint" style="margin-bottom: 8px">
+        这是模型 GGUF 内嵌的原生模板（<span class="mono">tokenizer.chat_template</span>），
+        含模型训练时的角色标记与结束符。套用后到下次加载模型时生效，引擎会自动开启 Jinja 模式。
+      </div>
+      <pre class="tpl-code">{{ nativeTpl(tplModel) }}</pre>
+      <div class="row" style="margin-top: 12px; justify-content: flex-end; gap: 8px">
+        <button class="sm ghost" @click="tplOpen = false">取消</button>
+        <button class="sm primary" :disabled="tplApplying" @click="applyNativeTpl">
+          {{ tplApplying ? '套用中…' : '套用此模板' }}
+        </button>
+      </div>
+    </div>
+  </div>
 </template>
 
 <style scoped>
@@ -637,5 +703,25 @@ onMounted(async () => {
   display: grid;
   gap: 8px;
   padding-right: 4px;
+}
+
+.tpl-panel {
+  width: min(860px, 100%);
+  max-height: 86vh;
+}
+
+.tpl-code {
+  margin: 0;
+  flex: 1;
+  min-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  font: 11px/1.6 ui-monospace, Consolas, monospace;
+  color: var(--text);
 }
 </style>

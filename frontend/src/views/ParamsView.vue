@@ -18,6 +18,10 @@ const templatePick = ref('')
 
 const params = computed(() => state.params)
 const templates = chatTemplates
+// 模型 GGUF 内嵌的原生模板，作为下拉的第二组选项
+const nativeTemplates = computed(() =>
+  (state.models || []).filter((m) => m.meta && m.meta.chat_template),
+)
 
 // 分组：常用 / 采样 / 长度 / 控制 / 结构化 / Prompt / 加载 / 缓存 / 加速 / 服务
 const groups = computed(() => {
@@ -151,20 +155,34 @@ async function delPreset(name) {
   }
 }
 
-// 套用内置 Chat 模板：写入 draft 并立即保存到全局参数。
+// 套用 Chat 模板：写入 draft 并立即保存到全局参数。
+// 支持两类：内置模板（builtin:<id>）与模型 GGUF 内嵌的原生模板（native:<modelId>）。
 // chat_template_mode / chat_template 是加载级参数，下次加载模型时生效。
-async function applyTemplate(id) {
-  const t = findTemplate(id)
-  if (!t) return
-  draft.chat_template_mode = t.mode
-  draft.chat_template = t.text
+async function applyTemplate(pick) {
+  let mode, text, label
+  if (pick.startsWith('native:')) {
+    const mid = pick.slice(7)
+    const m = (state.models || []).find((x) => x.id === mid)
+    if (!m || !m.meta || !m.meta.chat_template) return
+    mode = 'jinja'
+    text = m.meta.chat_template
+    label = (m.name || m.id).split(/[\\/]/).pop() + ' 的原生模板'
+  } else {
+    const t = findTemplate(pick.startsWith('builtin:') ? pick.slice(8) : pick)
+    if (!t) return
+    mode = t.mode
+    text = t.text
+    label = t.label.split(' · ')[0]
+  }
+  draft.chat_template_mode = mode
+  draft.chat_template = text
   templatePick.value = ''
   try {
-    const values = { chat_template_mode: t.mode, chat_template: t.text }
+    const values = { chat_template_mode: mode, chat_template: text }
     state.params = await api.saveParams(values)
-    notify(t.mode === 'auto'
+    notify(mode === 'auto'
       ? '已切回 auto：下次加载模型将使用 GGUF 自带模板'
-      : `已套用「${t.label.split(' · ')[0]}」模板，下次加载模型时生效`, 'ok', 4200)
+      : `已套用「${label}」，下次加载模型时生效`, 'ok', 4200)
   } catch (e) {
     notify(e.message, 'err')
   }
@@ -202,16 +220,28 @@ onMounted(refreshParams)
           <span v-else> · 用模型自带模板</span>
         </span>
         <div class="spacer"></div>
-        <select v-model="templatePick" style="max-width: 260px" @change="applyTemplate(templatePick)">
-          <option value="" disabled>一键套用内置模板…</option>
-          <option v-for="t in templates" :key="t.id" :value="t.id">{{ t.label }}</option>
+        <select v-model="templatePick" style="max-width: 300px" @change="applyTemplate(templatePick)">
+          <option value="" disabled>一键套用模板…</option>
+          <optgroup label="内置模板">
+            <option v-for="t in templates" :key="t.id" :value="'builtin:' + t.id">{{ t.label }}</option>
+          </optgroup>
+          <optgroup v-if="nativeTemplates.length" label="模型自带模板（GGUF 内嵌）">
+            <option
+              v-for="m in nativeTemplates"
+              :key="m.id"
+              :value="'native:' + m.id"
+            >
+              {{ (m.name || m.id).split(/[\\/]/).pop() }}
+            </option>
+          </optgroup>
         </select>
       </div>
       <div class="hint" style="margin-top: 8px">
+        <b>推荐优先用「模型自带模板」</b>（从 GGUF 里提取的原生模板，含正确的结束符，最不容易出错或复读）。
         模板属于加载级参数，套用后在「模型」页重新加载模型才生效。若手机客户端报
         <span class="mono">System message must be at the beginning</span>，
-        通常保持 <b>auto</b> 即可（网关会自动把 system 提到首位）；若个别模型仍报错，优先试
-        <b>通用宽松</b> 模板（不挑角色顺序、最不容易报错），再考虑专用模板。套用自定义模板时程序会自动开启引擎的 Jinja 模式。
+        网关会自动把 system 提到首位；万一个别模型仍报错，再退而求其次用 <b>通用宽松</b> 模板。
+        套用自定义/原生模板时程序会自动开启引擎的 Jinja 模式。
       </div>
     </div>
 

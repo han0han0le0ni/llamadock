@@ -36,6 +36,10 @@ type Meta struct {
 	ParamsB     float64 `json:"params_b"` // 参数量（十亿），可由文件大小与量化推算
 	ExpertCount int     `json:"expert_count,omitempty"`
 	MoE         bool    `json:"moe"`
+	// ChatTemplate 是模型 GGUF 内嵌的原生对话模板（tokenizer.chat_template）。
+	// 这是模型"出厂"的模板，含正确的角色标记与结束符，优先于任何手写模板。
+	// 空字符串表示该模型未内嵌模板。
+	ChatTemplate string `json:"chat_template,omitempty"`
 }
 
 // KVBytesPerElement 返回量化类型对应的每元素字节数（近似值，用于 KV 显存估算）。
@@ -147,6 +151,12 @@ func Parse(path string) (*Meta, error) {
 		m.Arch = "llama"
 	}
 	m.Name = str(raw, "general.name")
+	// 原生对话模板：主流键是 tokenizer.chat_template，少数模型用 chat_template。
+	// 这是模型训练时用的模板，含正确的角色标记与 EOS，比手写模板可靠。
+	m.ChatTemplate = str(raw, "tokenizer.chat_template")
+	if m.ChatTemplate == "" {
+		m.ChatTemplate = str(raw, "chat_template")
+	}
 	m.Layers = intOf(raw, m.Arch+".block_count")
 	m.EmbDim = intOf(raw, m.Arch+".embedding_length")
 	m.Heads = intOf(raw, m.Arch+".attention.head_count")

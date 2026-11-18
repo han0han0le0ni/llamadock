@@ -59,3 +59,52 @@ export const chatTemplates = [
 export function findTemplate(id) {
   return chatTemplates.find((t) => t.id === id) || null
 }
+
+// 反查当前 mode/text 实际对应哪个模板，供参数页回显「正在用哪套模板」。
+// natives: 带 meta.chat_template 的模型列表（来自 state.models），用于识别模型原生模板。
+// 匹配不到内置/原生时标为自定义——文本照常保留，不影响已保存的配置。
+export function identifyTemplate(mode, text, natives = []) {
+  const m = String(mode || '').toLowerCase()
+  const tpl = String(text || '')
+  if (m === 'auto' || !tpl.trim()) {
+    return {
+      id: 'auto',
+      label: '模型自带模板（auto）',
+      source: 'auto',
+      mode: 'auto',
+      text: '',
+      hint: '使用 GGUF 内嵌的 tokenizer.chat_template',
+    }
+  }
+  const builtin = chatTemplates.find((x) => x.id !== 'auto' && x.mode === m && x.text === tpl)
+  if (builtin) {
+    return {
+      id: builtin.id,
+      label: builtin.label.split(' · ')[0],
+      source: '内置模板',
+      mode: builtin.mode,
+      text: builtin.text,
+      hint: builtin.desc || '',
+    }
+  }
+  const native = (natives || []).find((x) => x && x.meta && x.meta.chat_template === tpl)
+  if (native) {
+    const name = String(native.name || native.id || '').split(/[\\/]/).pop() || '模型'
+    return {
+      id: 'native:' + native.id,
+      label: name + ' 的原生模板',
+      source: '模型原生',
+      mode: m,
+      text: tpl,
+      hint: '从 GGUF 提取，含正确的结束符',
+    }
+  }
+  return {
+    id: 'custom',
+    label: '自定义模板',
+    source: '手写/外部',
+    mode: m,
+    text: tpl,
+    hint: '未匹配到内置或模型原生模板',
+  }
+}

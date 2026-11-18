@@ -3,7 +3,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { api } from '../api'
 import { state, notify, refreshParams } from '../store'
 import ParamRow from '../components/ParamRow.vue'
-import { chatTemplates, findTemplate } from '../chatTemplates'
+import { chatTemplates, findTemplate, identifyTemplate } from '../chatTemplates'
 
 const draft = reactive({})
 const keyword = ref('')
@@ -15,12 +15,28 @@ const showReco = ref(false)
 const recoValues = ref({})
 const presetPick = ref('')
 const templatePick = ref('')
+const showTplText = ref(false)
 
 const params = computed(() => state.params)
 const templates = chatTemplates
 // 模型 GGUF 内嵌的原生模板，作为下拉的第二组选项
 const nativeTemplates = computed(() =>
   (state.models || []).filter((m) => m.meta && m.meta.chat_template),
+)
+
+// 当前草稿/已保存配置分别对应哪套模板——用于明确回显「正在用哪个模板」，
+// 而不是只显示 mode=jinja + 「已设置自定义模板」这种看不出名字的提示。
+const currentTemplate = computed(() =>
+  identifyTemplate(draft.chat_template_mode, draft.chat_template, nativeTemplates.value),
+)
+const savedTemplate = computed(() =>
+  params.value
+    ? identifyTemplate(
+        params.value.values.chat_template_mode,
+        params.value.values.chat_template,
+        nativeTemplates.value,
+      )
+    : null,
 )
 
 // 分组：常用 / 采样 / 长度 / 控制 / 结构化 / Prompt / 加载 / 缓存 / 加速 / 服务
@@ -86,6 +102,11 @@ const changedCount = computed(() => {
   if (!params.value) return 0
   return Object.keys(draft).filter((k) => changed(k)).length
 })
+
+// 模板是否已保存：applyTemplate 会立即落盘，这里主要用于区分手工改了文本但没点保存的情况。
+const templateDirty = computed(
+  () => !!params.value && (changed('chat_template_mode') || changed('chat_template')),
+)
 
 async function save() {
   saving.value = true
@@ -176,10 +197,11 @@ async function applyTemplate(pick) {
   }
   draft.chat_template_mode = mode
   draft.chat_template = text
-  templatePick.value = ''
   try {
     const values = { chat_template_mode: mode, chat_template: text }
     state.params = await api.saveParams(values)
+    // 保留选择，让下拉框和下面的「当前使用」互相印证；需要重复套用时点「重新套用」。
+    templatePick.value = pick
     notify(mode === 'auto'
       ? '已切回 auto：下次加载模型将使用 GGUF 自带模板'
       : `已套用「${label}」，下次加载模型时生效`, 'ok', 4200)
@@ -214,11 +236,29 @@ onMounted(refreshParams)
     <div class="card tight">
       <div class="row wrap">
         <span class="badge info">Chat 模板</span>
-        <span class="hint">
-          当前模式：<b class="mono">{{ draft.chat_template_mode || 'auto' }}</b>
-          <span v-if="draft.chat_template"> · 已设置自定义模板</span>
-          <span v-else> · 用模型自带模板</span>
-        </span>
+        <div class="tpl-current">
+          <div class="row wrap" style="gap: 6px">
+            <span class="hint">当前使用：</span>
+            <b>{{ currentTemplate.label }}</b>
+            <span class="badge" :class="templateDirty ? 'warn' : 'ok'">
+              {{ templateDirty ? '未保存草稿' : '已保存' }}
+            </span>
+            <span class="badge">{{ currentTemplate.source }}</span>
+            <span class="hint mono">mode={{ currentTemplate.mode }}</span>
+            <button class="sm ghost" @click="showTplText = !showTplText">
+              {{ showTplText ? '收起模板全文 ▲' : '查看模板全文 ▼' }}
+            </button>
+            <button v-if="templatePick" class="sm ghost" @click="applyTemplate(templatePick)">
+              重新套用
+            </button>
+          </div>
+          <div v-if="templateDirty && savedTemplate" class="hint" style="margin-top: 4px">
+            已保存的是：{{ savedTemplate.label }}
+          </div>
+          <div v-if="showTplText" class="tpl-preview mono">
+{{ currentTemplate.text || '（空：使用模型 GGUF 内嵌模板）' }}
+          </div>
+        </div>
         <div class="spacer"></div>
         <select v-model="templatePick" style="max-width: 300px" @change="applyTemplate(templatePick)">
           <option value="" disabled>一键套用模板…</option>
@@ -237,11 +277,10 @@ onMounted(refreshParams)
         </select>
       </div>
       <div class="hint" style="margin-top: 8px">
+        上面显示的是<b>当前保存的全局模板</b>；它是加载级参数，点「加载」重新加载模型后才会变成引擎实际使用的模板。
         <b>推荐优先用「模型自带模板」</b>（从 GGUF 里提取的原生模板，含正确的结束符，最不容易出错或复读）。
-        模板属于加载级参数，套用后在「模型」页重新加载模型才生效。若手机客户端报
-        <span class="mono">System message must be at the beginning</span>，
+        若手机客户端报 <span class="mono">System message must be at the beginning</span>，
         网关会自动把 system 提到首位；万一个别模型仍报错，再退而求其次用 <b>通用宽松</b> 模板。
-        套用自定义/原生模板时程序会自动开启引擎的 Jinja 模式。
       </div>
     </div>
 
@@ -305,3 +344,25 @@ onMounted(refreshParams)
   </div>
   <div v-else class="empty">加载参数注册表…</div>
 </template>
+
+<style scoped>
+.tpl-current {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.tpl-preview {
+  max-height: 170px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+</style>

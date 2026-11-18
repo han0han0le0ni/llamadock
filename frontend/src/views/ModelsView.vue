@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { api } from '../api'
 import ParamRow from '../components/ParamRow.vue'
+import { identifyTemplate } from '../chatTemplates'
 import {
   state,
   notify,
@@ -27,6 +28,26 @@ const reco = computed(() => state.recommendation)
 const st = computed(() => state.status)
 const health = computed(() => (st.value && st.value.engine && st.value.engine.health) || {})
 const runtimes = computed(() => (state.engineDetail && state.engineDetail.runtimes) || [])
+
+// 当前保存的全局模板（供原生模板弹窗回显，确认「套用」是否落盘）
+const currentGlobalTemplate = computed(() =>
+  state.params && state.params.values
+    ? identifyTemplate(
+        state.params.values.chat_template_mode,
+        state.params.values.chat_template,
+        state.models || [],
+      )
+    : null,
+)
+const tplMatchesCurrent = computed(
+  () =>
+    !!(
+      tplModel.value &&
+      currentGlobalTemplate.value &&
+      currentGlobalTemplate.value.text &&
+      currentGlobalTemplate.value.text === nativeTpl(tplModel.value)
+    ),
+)
 
 const purposes = [
   { v: 'chat', l: '通用对话' },
@@ -662,6 +683,12 @@ onMounted(async () => {
       <div class="hint" style="margin-bottom: 8px">
         这是模型 GGUF 内嵌的原生模板（<span class="mono">tokenizer.chat_template</span>），
         含模型训练时的角色标记与结束符。套用后到下次加载模型时生效，引擎会自动开启 Jinja 模式。
+      </div>
+      <div v-if="currentGlobalTemplate" class="hint" style="margin-bottom: 8px">
+        当前全局模板：<b>{{ currentGlobalTemplate.label }}</b>
+        <span class="badge">{{ currentGlobalTemplate.source }}</span>
+        <span v-if="tplMatchesCurrent" class="badge ok">已套用此模型的原生模板</span>
+        <span v-else class="badge warn">与此模型的原生模板不同</span>
       </div>
       <pre class="tpl-code">{{ nativeTpl(tplModel) }}</pre>
       <div class="row" style="margin-top: 12px; justify-content: flex-end; gap: 8px">

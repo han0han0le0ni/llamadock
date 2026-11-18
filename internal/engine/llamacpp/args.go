@@ -24,6 +24,10 @@ func BuildArgs(values map[string]any) []string {
 	if m := p.str("model_path"); m != "" {
 		a.add("-m", m)
 	}
+	// 多模态：视觉投影（mmproj）与主模型必须一起加载，否则 VLM 看不到图片
+	if mm := p.str("mmproj"); mm != "" {
+		a.add("--mmproj", mm)
+	}
 	// 上下文与卸载
 	if v := p.int("n_ctx"); v > 0 {
 		a.add("-c", strconv.Itoa(v))

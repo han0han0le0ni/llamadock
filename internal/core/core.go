@@ -432,7 +432,7 @@ func (c *Core) Status() Status {
 		ParamsCount:    params.Count(),
 		GatewayURL:     fmt.Sprintf("http://%s:%d/v1", netinfo.BestLANIP(), snap.Server.Port),
 		Devices:        c.deviceCount(),
-		HasNVIDIA:       hw != nil && hw.HasNVIDIA(),
+		HasNVIDIA:      hw != nil && hw.HasNVIDIA(),
 		LastModelPath:  active,
 	}
 	if hw != nil {
@@ -468,24 +468,24 @@ func (c *Core) deviceCount() int {
 
 // Status 状态快照。
 type Status struct {
-	Version        string             `json:"version"`
-	UptimeSec      int64              `json:"uptime_sec"`
-	GatewayRunning bool               `json:"gateway_running"`
-	GatewayAddr    string             `json:"gateway_addr"`
-	GatewayURL     string             `json:"gateway_url"`
-	AdminAddr      string             `json:"admin_addr"`
-	Engine         EngineDTO          `json:"engine"`
-	ModelCount     int                `json:"model_count"`
-	LoadedModel    string             `json:"loaded_model"`
-	ActiveModel    string             `json:"active_model"`
-	LastModelPath  string             `json:"last_model_path,omitempty"`
-	Metrics        metrics.Snapshot   `json:"metrics"`
-	HW             *hwprobe.Profile   `json:"hardware,omitempty"`
-	HWSummary      string             `json:"hardware_summary"`
-	HasNVIDIA      bool               `json:"has_nvidia"`
-	ParamsCount    int                `json:"params_count"`
-	Devices        int                `json:"devices"`
-	Notes          []string           `json:"notes,omitempty"`
+	Version        string           `json:"version"`
+	UptimeSec      int64            `json:"uptime_sec"`
+	GatewayRunning bool             `json:"gateway_running"`
+	GatewayAddr    string           `json:"gateway_addr"`
+	GatewayURL     string           `json:"gateway_url"`
+	AdminAddr      string           `json:"admin_addr"`
+	Engine         EngineDTO        `json:"engine"`
+	ModelCount     int              `json:"model_count"`
+	LoadedModel    string           `json:"loaded_model"`
+	ActiveModel    string           `json:"active_model"`
+	LastModelPath  string           `json:"last_model_path,omitempty"`
+	Metrics        metrics.Snapshot `json:"metrics"`
+	HW             *hwprobe.Profile `json:"hardware,omitempty"`
+	HWSummary      string           `json:"hardware_summary"`
+	HasNVIDIA      bool             `json:"has_nvidia"`
+	ParamsCount    int              `json:"params_count"`
+	Devices        int              `json:"devices"`
+	Notes          []string         `json:"notes,omitempty"`
 }
 
 // EngineDTO 引擎状态。
@@ -993,6 +993,14 @@ func (c *Core) loadEngineModel(ctx context.Context, m engine.Model, ctxLen int, 
 			}
 		}
 	}
+	// 多模态：用户没显式指定 mmproj 时，在同目录自动找配套的视觉投影文件。
+	// llama.cpp 的主模型里不含 ViT 权重，VLM 必须带 --mmproj 才能处理图片。
+	if mm, _ := values["mmproj"].(string); strings.TrimSpace(mm) == "" {
+		if found := findMMProj(m); found != "" {
+			values["mmproj"] = found
+			c.Log.Info("自动识别视觉投影 mmproj", "model", m.Name, "mmproj", found)
+		}
+	}
 	if m.Path != "" {
 		values["model_path"] = m.Path
 	}
@@ -1037,6 +1045,56 @@ func matchAutoTemplate(name, generalName, modelKey string, rules []config.Templa
 		}
 	}
 	return nil
+}
+
+// findMMProj 为 VLM 在主模型同目录寻找配套的 mmproj-*.gguf。
+// llama.cpp 把视觉塔单独放在 mmproj 文件里；只加载主模型时图片输入会被忽略或报错。
+// 多个候选时选与主模型文件名公共前缀最长的那个（如 mmproj-Qwen3VL-8B-Instruct-F16.gguf）。
+func findMMProj(m engine.Model) string {
+	if m.Path == "" {
+		return ""
+	}
+	arch := strings.ToLower(m.Arch)
+	typ := strings.ToLower(m.Type)
+	if typ != "vlm" && !strings.Contains(arch, "vl") && !strings.Contains(arch, "vision") {
+		return ""
+	}
+	dir := filepath.Dir(m.Path)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	base := strings.ToLower(strings.TrimSuffix(filepath.Base(m.Path), filepath.Ext(m.Path)))
+	best, bestScore := "", -1
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		lower := strings.ToLower(name)
+		if !strings.HasSuffix(lower, ".gguf") || !strings.Contains(lower, "mmproj") {
+			continue
+		}
+		// 去掉 mmproj- 前缀再比，否则所有候选的公共前缀都是 "mmproj-"，无法区分模型。
+		stem := strings.Trim(strings.ReplaceAll(lower, "mmproj", ""), "-_.")
+		score := commonPrefixLen(stem, base)
+		if score > bestScore {
+			best, bestScore = filepath.Join(dir, name), score
+		}
+	}
+	return best
+}
+
+func commonPrefixLen(a, b string) int {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	i := 0
+	for i < n && a[i] == b[i] {
+		i++
+	}
+	return i
 }
 
 // UnloadModel 卸载模型（即停止 llama-server 子进程，显存随之释放）。

@@ -300,3 +300,17 @@ func TestPickBestPrefersGPU(t *testing.T) {
 		t.Fatalf("无 GPU 需求时应选 CPU 版，实际 %s", rt.Variant)
 	}
 }
+
+// VLM 必须把 mmproj 作为启动参数交给 llama-server，否则主模型看不到图片。
+func TestBuildArgsMMProj(t *testing.T) {
+	args := BuildArgs(baseValues())
+	if argIndex(args, "--mmproj") >= 0 {
+		t.Fatal("未设置 mmproj 时不应下发该开关")
+	}
+	v := baseValues()
+	v["mmproj"] = `E:\Models\mmproj-Qwen3VL-8B-Instruct-F16.gguf`
+	args = BuildArgs(v)
+	if got := argValue(args, "--mmproj"); got != v["mmproj"] {
+		t.Fatalf("mmproj 未正确下发：%s", got)
+	}
+}

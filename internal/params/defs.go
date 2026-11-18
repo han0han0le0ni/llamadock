@@ -142,6 +142,9 @@ func regLoad() {
 	reg(Param{Key: "model_path", Label: "模型路径", Group: "加载", Scope: ScopeLoad, Kind: KindString,
 		Default: "", Runtime: false, Overridable: false, PassThrough: true,
 		Desc: "GGUF 文件路径，由「模型」页选择"})
+	reg(Param{Key: "mmproj", Label: "视觉投影 mmproj", Group: "加载", Scope: ScopeLoad, Kind: KindString,
+		Default: "", Runtime: false, Overridable: false, PassThrough: true,
+		Desc: "多模态模型的 mmproj-*.gguf 路径。留空时自动在同目录查找；VLM 必须配它才能识别图片"})
 	reg(Param{Key: "lora", Label: "LoRA 列表", Group: "加载", Scope: ScopeLoad, Kind: KindStringList,
 		Default: []string{}, Runtime: false, Overridable: false, PassThrough: true,
 		Desc: "挂载的 LoRA 适配器路径"})

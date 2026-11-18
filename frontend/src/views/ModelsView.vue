@@ -69,6 +69,11 @@ function meta(m) {
   return bits.join(' · ') || '元数据不可用'
 }
 
+// 视觉语言模型：llama.cpp 需要额外的 mmproj 文件才能处理图片
+function isVlm(m) {
+  return !!(m && (m.type === 'vlm' || /vl|vision/i.test(m.arch || '')))
+}
+
 // 模型 GGUF 内嵌的原生对话模板（tokenizer.chat_template）
 function nativeTpl(m) {
   return (m && m.meta && m.meta.chat_template) || ''
@@ -429,6 +434,14 @@ onMounted(async () => {
                     title="这个模型自带原生对话模板（GGUF 内嵌），点击查看并套用"
                   >
                     原生模板
+                  </span>
+                  <span
+                    v-if="isVlm(m)"
+                    class="badge warn"
+                    style="margin-left: 6px"
+                    title="视觉模型需要配套的 mmproj-*.gguf；把它放在模型同目录会自动识别，或在参数页填写 mmproj 路径"
+                  >
+                    视觉模型 · 需 mmproj
                   </span>
                 </div>
                 <div class="hint mono">{{ m.id }}</div>

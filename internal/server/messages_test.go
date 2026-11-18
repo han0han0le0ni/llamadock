@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"airunner/internal/core"
 )
 
 func msgs(payload map[string]any) []any {
@@ -125,5 +127,41 @@ func TestLocalizeEngineErrorPassthrough(t *testing.T) {
 	bad := []byte(`garbage`)
 	if string(localizeEngineError(bad)) != string(bad) {
 		t.Fatal("非 JSON 应原样返回")
+	}
+}
+
+// 锁定模式下，客户端请求别的模型也不能顶掉当前已加载模型。
+func TestResolveModelLockKeepsLoadedModel(t *testing.T) {
+	models := []core.ModelDTO{
+		{ID: "model-a"},
+		{ID: "model-b", Loaded: true},
+	}
+	got, err := resolveModel("model-a", models, true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "model-b" {
+		t.Fatalf("应锁定到已加载模型 model-b，实际 %s", got)
+	}
+}
+
+// 没有任何模型加载时，锁定模式不阻止正常的按需加载。
+func TestResolveModelLockFallsBackWhenNothingLoaded(t *testing.T) {
+	models := []core.ModelDTO{{ID: "model-a"}}
+	got, err := resolveModel("model-a", models, true, true)
+	if err != nil || got != "model-a" {
+		t.Fatalf("无已加载模型时应正常解析，got=%s err=%v", got, err)
+	}
+}
+
+// 未开启锁定时保持原行为：客户端指定哪个模型就用哪个。
+func TestResolveModelWithoutLockStillSwitches(t *testing.T) {
+	models := []core.ModelDTO{
+		{ID: "model-a", Loaded: true},
+		{ID: "model-b"},
+	}
+	got, err := resolveModel("model-b", models, true, false)
+	if err != nil || got != "model-b" {
+		t.Fatalf("未锁定应按请求切换模型，got=%s err=%v", got, err)
 	}
 }

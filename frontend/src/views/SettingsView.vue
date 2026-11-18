@@ -18,6 +18,7 @@ const form = reactive({
   port: 8080,
   autoStart: true,
   normalizeMessages: true,
+  lockLoadedModel: false,
   theme: 'dark',
   minimizeToTray: true,
   openBrowser: true,
@@ -89,6 +90,7 @@ watch(
     form.autoStart = c.server.auto_start_gateway
     // 后端指针字段：undefined/null 表示默认开启，只有显式 false 才关闭
     form.normalizeMessages = c.server.normalize_messages !== false
+    form.lockLoadedModel = !!c.server.lock_loaded_model
     form.theme = c.ui.theme
     form.minimizeToTray = c.ui.minimize_to_tray
     form.openBrowser = c.ui.open_browser
@@ -265,6 +267,7 @@ async function saveService() {
         port: Number(form.port),
         auto_start_gateway: form.autoStart,
         normalize_messages: form.normalizeMessages,
+        lock_loaded_model: form.lockLoadedModel,
       },
       ui: {
         theme: form.theme,
@@ -744,9 +747,17 @@ onUnmounted(stopInstallPoll)
         <input type="checkbox" v-model="form.normalizeMessages" style="width: auto" />
         <span class="hint">规范化消息顺序：把 system 提到首位（兼容 Llama3/Qwen 严格模板，建议开启）</span>
       </label>
+      <label class="row" style="gap: 8px; margin-bottom: 8px">
+        <input type="checkbox" v-model="form.lockLoadedModel" style="width: auto" />
+        <span class="hint">
+          <b>锁定当前模型</b>：忽略客户端请求里的 model 字段，始终用「模型」页已加载的模型和模板。
+          单引擎一次只能跑一个 GGUF，开启后外部客户端就不会把当前模型顶掉、连带模板一起切换。
+          要换模型请先在「模型」页手动加载。
+        </span>
+      </label>
       <label class="row" style="gap: 8px">
         <input type="checkbox" v-model="svc.allow_auto_load" style="width: auto" />
-        <span class="hint">允许按需自动加载（客户端请求未加载模型时）</span>
+        <span class="hint">允许按需自动加载（没有已加载模型时，客户端请求可自动拉起）</span>
       </label>
       <div class="row" style="margin-top: 12px">
         <button class="sm primary" :disabled="saving" @click="saveService">

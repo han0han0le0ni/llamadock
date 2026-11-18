@@ -265,7 +265,7 @@ func (g *Gateway) handleCompletions(path string) http.HandlerFunc {
 		// 模型解析
 		model, _ := payload["model"].(string)
 		models, _ := g.core.Models(r.Context())
-		resolved, err := resolveModel(model, models, cfg.Server.AllowAutoLoad)
+		resolved, err := resolveModel(model, models, cfg.Server.AllowAutoLoad, cfg.Server.LockLoadedModel)
 		if err != nil {
 			status, errMsg = http.StatusNotFound, err.Error()
 			writeErr(w, status, "model_not_found", errMsg, "MODEL_NOT_FOUND")
@@ -478,8 +478,15 @@ func (g *Gateway) acquire(ctx context.Context, timeoutSec int) (func(), bool) {
 	}
 }
 
-func resolveModel(requested string, models []core.ModelDTO, allowAutoLoad bool) (string, error) {
+func resolveModel(requested string, models []core.ModelDTO, allowAutoLoad, lockLoaded bool) (string, error) {
 	requested = strings.TrimSpace(requested)
+	// 锁定当前模型：单引擎同一时间只能跑一个 GGUF。开启后，只要有模型已加载，
+	// 就忽略客户端 model 字段，防止外部客户端把当前模型（及其模板）顶掉。
+	if lockLoaded {
+		if loaded := loadedModelID(models); loaded != "" {
+			return loaded, nil
+		}
+	}
 	known := map[string]bool{}
 	for _, m := range models {
 		known[m.ID] = true
@@ -508,6 +515,16 @@ func resolveModel(requested string, models []core.ModelDTO, allowAutoLoad bool) 
 	}
 	// 未知模型也转发：由 EnsureLoaded 决定能否按需拉起，拉不起来会被明确拒绝
 	return requested, nil
+}
+
+// loadedModelID 返回当前已加载模型的完整 ID；没有已加载模型时返回空串。
+func loadedModelID(models []core.ModelDTO) string {
+	for _, m := range models {
+		if m.Loaded {
+			return m.ID
+		}
+	}
+	return ""
 }
 
 func shortName(id string) string {

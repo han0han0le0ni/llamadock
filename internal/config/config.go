@@ -18,17 +18,20 @@ const CurrentVersion = 1
 
 // ServerConfig 网关与服务参数。
 type ServerConfig struct {
-	Host           string   `json:"host"`             // 监听地址，默认 0.0.0.0
-	Port           int      `json:"port"`             // 网关端口，默认 8080
-	AdminPort      int      `json:"admin_port"`       // 本机管理 API 端口，默认 8081（仅 127.0.0.1）
-	CORSOrigins    []string `json:"cors_origins"`     // 允许的跨域来源
-	MaxBodyMB      int      `json:"max_body_mb"`      // 请求体上限
+	Host           string   `json:"host"`         // 监听地址，默认 0.0.0.0
+	Port           int      `json:"port"`         // 网关端口，默认 8080
+	AdminPort      int      `json:"admin_port"`   // 本机管理 API 端口，默认 8081（仅 127.0.0.1）
+	CORSOrigins    []string `json:"cors_origins"` // 允许的跨域来源
+	MaxBodyMB      int      `json:"max_body_mb"`  // 请求体上限
 	RequestTimeout int      `json:"request_timeout_sec"`
 	MaxConcurrent  int      `json:"max_concurrent_requests"`
 	AutoStart      bool     `json:"auto_start_gateway"` // 启动时自动开网关
 	AllowAutoLoad  bool     `json:"allow_auto_load"`
-	IdleUnloadMin  int      `json:"idle_unload_minutes"`
-	VramReserveMB  int      `json:"vram_reserve_mb"`
+	// LockLoadedModel 为 true 时忽略客户端请求里的 model 字段，始终用当前已加载的模型。
+	// 单引擎同一时间只能跑一个 GGUF，开启后可避免外部客户端把已加载模型顶掉、连带模板一起切换。
+	LockLoadedModel bool `json:"lock_loaded_model,omitempty"`
+	IdleUnloadMin   int  `json:"idle_unload_minutes"`
+	VramReserveMB   int  `json:"vram_reserve_mb"`
 	// NormalizeMessages 控制是否在转发前把 system 消息提到 messages 首位。
 	// 指针类型：nil（老配置缺失）= 默认开启；显式 false 关闭。
 	NormalizeMessages *bool `json:"normalize_messages,omitempty"`
@@ -77,10 +80,10 @@ type Preset struct {
 // 规则自带完整模板正文（而非仅存模板 id），这样后端无需了解前端模板库，
 // 也就不存在前后端模板内容漂移的问题。前端套用内置模板时把 mode/text 一并写入。
 type TemplateRule struct {
-	Pattern string `json:"pattern"`            // 匹配模型名的关键字（小写子串），如 "qwen2.5" / "llama-3" / "gemma"
-	Mode    string `json:"mode"`               // auto | manual | jinja
-	Text    string `json:"text"`               // 模板正文（Jinja）
-	Label   string `json:"label,omitempty"`    // 展示名，仅用于界面回显
+	Pattern string `json:"pattern"`         // 匹配模型名的关键字（小写子串），如 "qwen2.5" / "llama-3" / "gemma"
+	Mode    string `json:"mode"`            // auto | manual | jinja
+	Text    string `json:"text"`            // 模板正文（Jinja）
+	Label   string `json:"label,omitempty"` // 展示名，仅用于界面回显
 }
 
 // ModelOverride 单个模型的个性化设置。
@@ -116,7 +119,7 @@ type Config struct {
 	LogHistory    int                      `json:"request_log_size"`
 
 	// 模型名 → Chat 模板自动套用。加载模型时若用户未显式指定模板，按规则匹配模型名套用。
-	TemplateAutoEnabled bool          `json:"template_auto_enabled"`
+	TemplateAutoEnabled bool           `json:"template_auto_enabled"`
 	TemplateAutoMap     []TemplateRule `json:"template_auto_map,omitempty"`
 }
 

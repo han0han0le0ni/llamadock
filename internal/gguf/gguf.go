@@ -63,7 +63,32 @@ func isVisionArch(arch string) bool {
 		a == "llava" || a == "llava-qwen2" || a == "minicpmv" || a == "gemma3"
 }
 
-// IsVision 判断模型是否具备图文输入能力（架构或标签任一命中）。
+// templateVisionMarkers 是 chat_template 里能证明模型支持图片输入的强标记。
+// 很多纯文本模型的 tags 是空的，但模板里保留了图片处理分支——此时应以模板为准，
+// 否则会漏判（例如 DeepSeek-V4-Pro-Qwen3.5 的模板含完整视觉标记但 tags 无 vision）。
+// 注意：只用"强标记"，避免把 do_vision_count 这类弱标记误判为视觉模型。
+var templateVisionMarkers = []string{
+	"vision_start", "vision_end", "image_pad", "<|image|>", "<image>",
+	"image_url", "image_count", "pixel_values", "img_context",
+}
+
+// templateHasVision 检查内嵌模板是否含图片处理逻辑。
+// 至少命中 2 个强标记才算视觉（单个标记可能是模板库通用片段）。
+func templateHasVision(tpl string) bool {
+	if tpl == "" {
+		return false
+	}
+	lower := strings.ToLower(tpl)
+	hits := 0
+	for _, marker := range templateVisionMarkers {
+		if strings.Contains(lower, marker) {
+			hits++
+		}
+	}
+	return hits >= 2
+}
+
+// IsVision 判断模型是否具备图文输入能力（架构、标签、模板三者任一命中）。
 func (m *Meta) IsVision() bool {
 	if m == nil {
 		return false
@@ -76,11 +101,11 @@ func (m *Meta) IsVision() bool {
 			return true
 		}
 	}
-	return false
+	return templateHasVision(m.ChatTemplate)
 }
 
-// CapabilitiesOf 从架构与标签归纳出人类可读的能力列表，顺序稳定。
-func CapabilitiesOf(arch string, tags []string) []string {
+// CapabilitiesOf 从架构、标签与模板归纳出人类可读的能力列表，顺序稳定。
+func CapabilitiesOf(arch string, tags []string, chatTemplate string) []string {
 	out := []string{}
 	seen := map[string]bool{}
 	add := func(s string) {
@@ -93,7 +118,7 @@ func CapabilitiesOf(arch string, tags []string) []string {
 	for _, t := range tags {
 		lower[strings.ToLower(strings.TrimSpace(t))] = true
 	}
-	if isVisionArch(arch) || hasAny(lower, visionTags) {
+	if isVisionArch(arch) || hasAny(lower, visionTags) || templateHasVision(chatTemplate) {
 		add("视觉")
 	}
 	if lower["reasoning"] || lower["deepseek-r1"] || lower["qwq"] {
@@ -140,6 +165,11 @@ func findMMProjInDir(modelPath string) string {
 		}
 		stem := strings.Trim(strings.ReplaceAll(lower, "mmproj", ""), "-_.")
 		score := commonPrefixLenLocal(stem, base)
+		// 只有文件名前缀足够相似（≥8 字符）才认作配套投影。
+		// 否则 Qwen3VL 的 mmproj 会被 LM Studio 那样错误地配给同目录所有 qwen35 模型。
+		if score < 8 {
+			continue
+		}
 		if score > bestScore {
 			best, bestScore = filepath.Join(dir, e.Name()), score
 		}
@@ -305,7 +335,7 @@ func Parse(path string) (*Meta, error) {
 	// general.tags 是字符串数组（LLM 发布者声明的能力/用途标签）。
 	// 读取它用于展示能力徽章与识别视觉模型（如 qwen35 变体靠 image-text-to-text 标记）。
 	m.Tags = stringArray(raw, "general.tags")
-	m.Capabilities = CapabilitiesOf(m.Arch, m.Tags)
+	m.Capabilities = CapabilitiesOf(m.Arch, m.Tags, m.ChatTemplate)
 	if m.IsVision() {
 		m.MMProj = findMMProjInDir(path)
 	}

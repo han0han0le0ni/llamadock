@@ -172,3 +172,44 @@ func TestVisionDetectionByArch(t *testing.T) {
 		t.Fatal("qwen3vl 架构应判为视觉模型")
 	}
 }
+
+func TestTemplateHasVision(t *testing.T) {
+	// 完整视觉模板（DeepSeek-V4-Pro / qwen3.5-9B 的真实情况）：应判为视觉
+	full := "{% set image_count = namespace(value=0) %}{% if 'image_url' in item %}" +
+		"<|vision_start|><|image_pad|><|vision_end|>{% endif %}"
+	if !templateHasVision(full) {
+		t.Fatal("含多个视觉标记的模板应判为视觉")
+	}
+	// 只有 do_vision_count 弱标记（Nyx-RP 的真实情况）：不应判为视觉
+	if templateHasVision("{% macro render(do_vision_count) %}hello{% endmacro %}") {
+		t.Fatal("仅 do_vision_count 弱标记不应判为视觉")
+	}
+	// 纯文本模板
+	if templateHasVision("{{ user }}: {{ content }}\n{{ assistant }}:") {
+		t.Fatal("纯文本模板不应判为视觉")
+	}
+	// 空模板
+	if templateHasVision("") {
+		t.Fatal("空模板不应判为视觉")
+	}
+}
+
+func TestVisionByTemplateViaParse(t *testing.T) {
+	// tags 为空 + 架构 qwen35，但模板含完整视觉标记 → 仍应判为视觉
+	// （对应 DeepSeek-V4-Pro-Qwen3.5：tags 没标 vision，但模板支持图片）
+	p := makeTinyGGUF(t, map[string]string{
+		"general.architecture":    "qwen35",
+		"tokenizer.chat_template": "{% set image_count = 0 %}<|vision_start|><|image_pad|><|vision_end|>{{ image_url }}",
+	})
+	m, err := Parse(p)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !m.IsVision() {
+		t.Fatal("模板含完整视觉标记应判为视觉模型")
+	}
+	joined := strings.Join(m.Capabilities, ",")
+	if !strings.Contains(joined, "视觉") {
+		t.Fatalf("Capabilities 应含视觉：%v", m.Capabilities)
+	}
+}

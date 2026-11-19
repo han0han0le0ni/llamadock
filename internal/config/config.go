@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"airunner/internal/hwprobe"
@@ -76,6 +77,38 @@ type ImageConfig struct {
 	DefaultHeight int     `json:"default_height"`    // 默认出图高
 	DefaultSteps  int     `json:"default_steps"`     // 默认采样步数
 	DefaultCfg    float64 `json:"default_cfg_scale"` // 默认 CFG
+	DefaultSampler string `json:"default_sampler,omitempty"` // 默认采样器（euler_a / euler 等）
+	// 出图落盘目录（用于生成局域网可访问的 url，让手机端直接打开/保存）。
+	// 留空则默认用配置目录下的 images 子目录，例如 %APPDATA%/AIRunner/images。
+	OutputDir string `json:"output_dir,omitempty"`
+
+	// 生图模型预设：把"用哪些模型文件 + 该模型的默认出图参数"打包。
+	// 切换预设（ImageUseProfile）会把选中预设的字段写回上面的主字段并持久化，
+	// 这样 sdcpp.Manager 的启动链路无需感知预设概念（仍只读 ModelPath/ExtraArgs）。
+	Profiles      []ImageProfile `json:"profiles,omitempty"`
+	ActiveProfile string         `json:"active_profile,omitempty"`
+}
+
+// ImageProfile 一个生图模型预设。
+//
+// Mode:
+//   - single     —— 单文件模型（SD1.5/SDXL/SD3 单文件），ModelPath 传给 -m
+//   - components —— 多组件模型（Qwen-Image/Flux/Wan 等），ModelPath 留空，
+//                  由 ExtraArgs 提供 --diffusion-model / --llm / --vae 等参数
+//
+// 激活预设时会把 ModelPath / ExtraArgs / 默认出图参数写回 ImageConfig 主字段。
+type ImageProfile struct {
+	ID             string  `json:"id"`                        // 稳定标识
+	Name           string  `json:"name"`                      // 展示名，如 "SD 1.5" / "Qwen-Image 2.1"
+	Mode           string  `json:"mode"`                      // single | components
+	ModelPath      string  `json:"model_path,omitempty"`      // single: 传给 -m 的单文件路径
+	ExtraArgs      string  `json:"extra_args,omitempty"`      // components: --diffusion-model/--llm/--vae 等；single 一般留空
+	DefaultWidth   int     `json:"default_width,omitempty"`
+	DefaultHeight  int     `json:"default_height,omitempty"`
+	DefaultSteps   int     `json:"default_steps,omitempty"`
+	DefaultCfg     float64 `json:"default_cfg_scale,omitempty"`
+	DefaultSampler string  `json:"default_sampler,omitempty"`
+	Note           string  `json:"note,omitempty"`            // 界面提示（显存/速度/文件说明）
 }
 
 // UIConfig 界面与桌面行为。
@@ -363,6 +396,22 @@ func (m *Manager) migrate(c *Config) {
 	}
 	if c.Image.DefaultCfg == 0 {
 		c.Image.DefaultCfg = def.Image.DefaultCfg
+	}
+	// 老配置没有生图预设时，用当前主字段造一个「当前模型」预设，保证向后兼容；
+	// 用户后续可在设置页增删预设、在生图页切换。
+	if len(c.Image.Profiles) == 0 && (strings.TrimSpace(c.Image.ModelPath) != "" || strings.TrimSpace(c.Image.ExtraArgs) != "") {
+		p := ImageProfile{
+			ID: "legacy-current", Name: "当前模型", Mode: "single",
+			ModelPath: c.Image.ModelPath, ExtraArgs: c.Image.ExtraArgs,
+			DefaultWidth: c.Image.DefaultWidth, DefaultHeight: c.Image.DefaultHeight,
+			DefaultSteps: c.Image.DefaultSteps, DefaultCfg: c.Image.DefaultCfg,
+			DefaultSampler: c.Image.DefaultSampler,
+		}
+		if strings.TrimSpace(c.Image.ModelPath) == "" {
+			p.Mode = "components"
+		}
+		c.Image.Profiles = []ImageProfile{p}
+		c.Image.ActiveProfile = p.ID
 	}
 	if c.UI.Theme == "" {
 		c.UI.Theme = def.UI.Theme

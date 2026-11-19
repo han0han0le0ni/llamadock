@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { api } from '../api'
 import { chatTemplates, findTemplate } from '../chatTemplates'
+import Icon from '../components/Icon.vue'
 import {
   state,
   notify,
@@ -11,6 +12,7 @@ import {
   refreshEngineDetail,
   refreshModelRoots,
   engineLabel,
+  IMAGE_FEATURE_ENABLED,
 } from '../store'
 
 const form = reactive({
@@ -51,6 +53,7 @@ const img = reactive({
   default_height: 512,
   default_steps: 25,
   default_cfg_scale: 7,
+  output_dir: '',
 })
 const imgPickBusy = ref(false)
 const svc = reactive({
@@ -137,6 +140,7 @@ watch(
     img.default_height = im.default_height || 512
     img.default_steps = im.default_steps || 25
     img.default_cfg_scale = im.default_cfg_scale || 7
+    img.output_dir = im.output_dir || ''
 
     // 模板自动映射：mode/text 优先匹配内置模板 id 供下拉回显，匹配不到记为自定义
     tplAuto.enabled = c.template_auto_enabled !== false
@@ -237,6 +241,7 @@ function imagePatch() {
     default_height: Number(img.default_height) || 512,
     default_steps: Number(img.default_steps) || 25,
     default_cfg_scale: Number(img.default_cfg_scale) || 7,
+    output_dir: (img.output_dir || '').trim(),
   }
 }
 
@@ -549,13 +554,13 @@ onUnmounted(stopInstallPoll)
     <!-- 引擎：这是整个程序的心脏，自己拉起 llama-server -->
     <div class="card" style="grid-column: 1 / -1">
       <div class="card-head">
-        <h3>推理引擎</h3>
+        <h3><Icon name="cpu" :size="16" />推理引擎</h3>
         <div class="spacer"></div>
         <span class="badge info">自管 · 可调度</span>
         <span class="badge" :class="st && st.engine.health.online ? 'ok' : 'err'">
           {{ st && st.engine.health.online ? '运行中' : '未运行' }}
         </span>
-        <button class="sm" @click="rescan">重新探测</button>
+        <button class="sm" @click="rescan"><Icon name="refresh" :size="13" />重新探测</button>
       </div>
 
       <div class="grid cols-2" style="gap: 12px">
@@ -605,16 +610,16 @@ onUnmounted(stopInstallPoll)
       </div>
 
       <div class="row" style="margin-top: 12px">
-        <button class="primary" :disabled="saving" @click="saveEngine">保存引擎设置</button>
+        <button class="primary" :disabled="saving" @click="saveEngine"><Icon name="check" :size="14" />保存引擎设置</button>
         <button :disabled="detecting" @click="detectRuntimes">
-          {{ detecting ? '探测中…' : '重新探测 llama-server' }}
+          <Icon name="search" :size="14" />{{ detecting ? '探测中…' : '重新探测 llama-server' }}
         </button>
       </div>
 
       <!-- 一键安装：官方 release → 运行时目录，装完自动写回 exe 路径 -->
       <div class="card tight" style="margin-top: 14px">
         <div class="card-head">
-          <h3 style="font-size: 14px">一键安装 llama-server</h3>
+          <h3 style="font-size: 14px"><Icon name="download" :size="15" />一键安装 llama-server</h3>
           <div class="spacer"></div>
           <span class="badge" :class="installing ? 'info' : ''">{{ installing ? '进行中' : '空闲' }}</span>
         </div>
@@ -654,7 +659,7 @@ onUnmounted(stopInstallPoll)
 
       <div class="card tight" style="margin-top: 14px">
         <div class="card-head">
-          <h3 style="font-size: 14px">探测到的运行时</h3>
+          <h3 style="font-size: 14px"><Icon name="layers" :size="15" />探测到的运行时</h3>
           <div class="spacer"></div>
           <span class="badge">{{ runtimes.length }} 个</span>
         </div>
@@ -695,10 +700,11 @@ onUnmounted(stopInstallPoll)
       </div>
     </div>
 
-    <!-- 生图引擎：stable-diffusion.cpp 的 sd-server，与文本引擎完全独立 -->
+    <!-- 生图引擎：软回退后默认隐藏；源码与配置保留，识图逻辑不受影响 -->
+    <template v-if="IMAGE_FEATURE_ENABLED">
     <div class="card" style="grid-column: 1 / -1">
       <div class="card-head">
-        <h3>生图引擎（stable-diffusion.cpp）</h3>
+        <h3><Icon name="sparkles" :size="16" />生图引擎（stable-diffusion.cpp）</h3>
         <div class="spacer"></div>
         <span class="badge" :class="img.enabled ? 'ok' : ''">{{ img.enabled ? '已启用' : '未启用' }}</span>
       </div>
@@ -732,9 +738,19 @@ onUnmounted(stopInstallPoll)
         </label>
       </div>
 
+      <div class="hint" style="margin: 4px 0 10px; padding: 9px 11px; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--accent) 7%, var(--surface)); border: 1px solid var(--border-soft); line-height: 1.6">
+        生图模型预设（SD1.5 / Qwen-Image 2.1 等）在左侧「生图」页顶部切换。切换预设会自动改写下面的模型路径与额外参数，这里看到的是<b>当前预设正在使用</b>的值；一般不需要手动改。
+      </div>
+
       <label class="field">
         <span>默认生图模型路径（sd-server 单文件模型，可留空在生图页选）</span>
         <input v-model="img.model_path" placeholder="例如 E:\LM\SD\models\v1-5-pruned.gguf" />
+      </label>
+
+      <label class="field">
+        <span>出图保存目录（用于生成手机可访问的链接，留空则用配置目录下的 images 文件夹）</span>
+        <input v-model="img.output_dir" placeholder="留空默认：%APPDATA%/AIRunner/images" />
+        <span class="hint" style="margin-top: 4px">生成的图片会存到这里，并通过网关 <span class="mono">/v1/images/files/…</span> 提供局域网访问；最多保留最近 200 张。</span>
       </label>
 
       <label class="field">
@@ -789,15 +805,16 @@ onUnmounted(stopInstallPoll)
       </div>
 
       <div class="row">
-        <button class="primary" :disabled="saving" @click="saveImage">保存生图设置</button>
+        <button class="primary" :disabled="saving" @click="saveImage"><Icon name="check" :size="14" />保存生图设置</button>
         <span class="hint">保存后到左侧「生图」页启动引擎、填提示词出图。</span>
       </div>
     </div>
+    </template>
 
     <!-- 模型根目录 -->
     <div class="card">
       <div class="card-head">
-        <h3>模型根目录（gguf 库）</h3>
+        <h3><Icon name="drive" :size="16" />模型根目录（gguf 库）</h3>
         <div class="spacer"></div>
         <span class="badge">{{ roots.length }} 个</span>
       </div>
@@ -818,7 +835,7 @@ onUnmounted(stopInstallPoll)
 
     <!-- 参数推荐 -->
     <div class="card">
-      <div class="card-head"><h3>参数推荐</h3></div>
+      <div class="card-head"><h3><Icon name="zap" :size="16" />参数推荐</h3></div>
       <label class="field">
         <span>保守系数（显存预估算 × 该系数，1.15 更稳）</span>
         <input type="number" step="0.01" min="1" max="1.5" v-model.number="svc.advisor_conservative" />
@@ -840,7 +857,7 @@ onUnmounted(stopInstallPoll)
     <!-- 模型名 → Chat 模板自动套用 -->
     <div class="card" style="grid-column: 1 / -1">
       <div class="card-head">
-        <h3>模型名自动套用 Chat 模板</h3>
+        <h3><Icon name="sparkles" :size="16" />模型名自动套用 Chat 模板</h3>
         <div class="spacer"></div>
         <label class="row" style="gap: 6px; margin-right: 10px">
           <input type="checkbox" v-model="tplAuto.enabled" style="width: auto" />
@@ -880,9 +897,9 @@ onUnmounted(stopInstallPoll)
       </div>
 
       <div class="row wrap" style="gap: 8px; margin-top: 10px">
-        <button class="sm" :disabled="saving" @click="addTplRule">+ 添加规则</button>
+        <button class="sm" :disabled="saving" @click="addTplRule"><Icon name="sparkles" :size="13" />+ 添加规则</button>
         <button class="sm" :disabled="saving" @click="restoreDefaultRules">
-          恢复默认规则
+          <Icon name="refresh" :size="13" />恢复默认规则
         </button>
         <div class="spacer"></div>
         <span class="hint">「通用宽松」模板报错概率最低，适合拿不准的模型兜底。</span>
@@ -890,7 +907,7 @@ onUnmounted(stopInstallPoll)
     </div>
 
     <div class="card">
-      <div class="card-head"><h3>局域网网关</h3></div>
+      <div class="card-head"><h3><Icon name="globe" :size="16" />局域网网关</h3></div>
       <div class="grid cols-2" style="gap: 12px">
         <label class="field">
           <span>监听地址（0.0.0.0 = 局域网可访问）</span>
@@ -952,7 +969,7 @@ onUnmounted(stopInstallPoll)
     </div>
 
     <div class="card">
-      <div class="card-head"><h3>界面与运行</h3></div>
+      <div class="card-head"><h3><Icon name="settings" :size="16" />界面与运行</h3></div>
       <div class="grid cols-2" style="gap: 12px">
         <label class="field">
           <span>主题</span>
@@ -989,7 +1006,7 @@ onUnmounted(stopInstallPoll)
 
     <div class="card" style="grid-column: 1 / -1">
       <div class="card-head">
-        <h3>信息</h3>
+        <h3><Icon name="info" :size="16" />信息</h3>
         <div class="spacer"></div>
         <button class="sm" :disabled="saving" @click="saveService">
           {{ saving ? '保存中…' : '保存网关 / 界面 / 参数' }}

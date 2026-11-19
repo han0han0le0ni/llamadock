@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { api } from '../api'
 import ParamRow from '../components/ParamRow.vue'
+import Icon from '../components/Icon.vue'
 import { identifyTemplate } from '../chatTemplates'
 import {
   state,
@@ -79,6 +80,20 @@ function isVlm(m) {
   const tags = (m.meta && m.meta.tags) || []
   if (tags.some((t) => /vision|image-text-to-text|multimodal|vlm/i.test(t))) return true
   return m.type === 'vlm' || /vl|vision/i.test(m.arch || '')
+}
+
+// 角色分类：后端 GGUF 解析出的 kind（chat/vlm/embedding/mmproj/diffusion），type 作兜底。
+function role(m) {
+  if (!m) return 'chat'
+  const k = (m.meta && m.meta.kind) || ''
+  if (k) return k
+  const t = (m.type || '').toLowerCase()
+  if (t === 'mmproj' || t === 'diffusion' || t === 'embeddings') return t === 'embeddings' ? 'embedding' : t
+  return 'chat'
+}
+function isAttachment(m) {
+  const r = role(m)
+  return r === 'mmproj' || r === 'diffusion'
 }
 
 // 模型能力徽章：来自 GGUF general.tags + 架构归纳，与 LM Studio 的 Capabilities 一致。
@@ -373,8 +388,8 @@ onMounted(async () => {
         <span class="mono hint">{{ st ? st.engine.endpoint : '' }}</span>
         <span class="badge" v-if="st">{{ models.length }} 个模型</span>
         <div class="spacer"></div>
-        <button class="sm" @click="refreshModels">重新扫描</button>
-        <button class="sm" @click="refreshStatus">刷新状态</button>
+        <button class="sm" @click="refreshModels"><Icon name="refresh" :size="13" />重新扫描</button>
+        <button class="sm" @click="refreshStatus"><Icon name="activity" :size="13" />刷新状态</button>
       </div>
 
       <!-- 进程级信息一目了然 -->
@@ -416,7 +431,7 @@ onMounted(async () => {
 
     <div class="card">
       <div class="card-head">
-        <h3>模型列表</h3>
+        <h3><Icon name="models" :size="16" />模型列表</h3>
         <div class="spacer"></div>
         <span class="badge">{{ models.filter((m) => m.loaded).length }} 个已加载</span>
       </div>
@@ -438,6 +453,22 @@ onMounted(async () => {
               <td>
                 <div style="font-weight: 600">
                   {{ (m.name || m.id).split(/[\\/]/).pop() }}
+                  <span
+                    v-if="role(m) === 'diffusion'"
+                    class="badge warn"
+                    style="margin-left: 6px"
+                    title="这是扩散模型（如 Qwen-Image），当前生图功能已停用；它不能作为对话模型加载"
+                  >
+                    生图模型
+                  </span>
+                  <span
+                    v-else-if="role(m) === 'mmproj'"
+                    class="badge info"
+                    style="margin-left: 6px"
+                    title="这是视觉投影附件（mmproj），是视觉模型的「眼睛」，随主模型自动挂载，不能单独对话"
+                  >
+                    视觉投影 · 附件
+                  </span>
                   <span
                     v-if="memoryOf(m)"
                     class="badge info"
@@ -465,7 +496,7 @@ onMounted(async () => {
                     原生模板
                   </span>
                   <span
-                    v-if="isVlm(m) && !m.meta?.mmproj"
+                    v-if="!isAttachment(m) && isVlm(m) && !m.meta?.mmproj"
                     class="badge warn"
                     style="margin-left: 6px"
                     title="视觉模型需要配套的 mmproj-*.gguf；把它放在模型同目录会自动识别，或在参数页填写 mmproj 路径"
@@ -473,7 +504,7 @@ onMounted(async () => {
                     视觉 · 需 mmproj
                   </span>
                   <span
-                    v-else-if="isVlm(m)"
+                    v-else-if="!isAttachment(m) && isVlm(m)"
                     class="badge ok"
                     style="margin-left: 6px"
                     title="已找到配套的 mmproj 视觉投影，可以传图"
@@ -488,7 +519,10 @@ onMounted(async () => {
                 <span class="badge" :class="m.loaded ? 'ok' : ''">{{ m.loaded ? '已加载' : m.state || '未加载' }}</span>
               </td>
               <td>
-                <div class="row wrap" style="gap: 6px">
+                <div v-if="isAttachment(m)" class="hint" style="max-width: 280px">
+                  {{ role(m) === 'diffusion' ? '扩散模型附件，当前未启用生图；不作为对话模型加载' : '随视觉模型自动挂载，无需单独操作' }}
+                </div>
+                <div v-else class="row wrap" style="gap: 6px">
                   <button class="sm" :disabled="busy === m.id || m.loaded" @click="load(m)">
                     {{ busy === m.id ? '处理中…' : '加载' }}
                   </button>
@@ -513,7 +547,7 @@ onMounted(async () => {
     <!-- 模型记忆：每个模型自己调好的参数与使用统计（加载时自动套用） -->
     <div class="card" v-if="overrides.length">
       <div class="card-head">
-        <h3>模型记忆</h3>
+        <h3><Icon name="layers" :size="16" />模型记忆</h3>
         <div class="spacer"></div>
         <span class="hint">参数只在加载时生效 · 换个目录也不丢</span>
         <button class="sm" @click="loadOverrides">刷新</button>
@@ -564,7 +598,7 @@ onMounted(async () => {
     <div v-if="health.running" class="grid cols-2">
       <div class="card">
         <div class="card-head">
-          <h3>启动命令行</h3>
+          <h3><Icon name="terminal" :size="16" />启动命令行</h3>
           <div class="spacer"></div>
           <span class="badge">{{ health.bin_path ? health.bin_path.split('\\').pop() : 'llama-server.exe' }}</span>
         </div>
@@ -574,14 +608,14 @@ onMounted(async () => {
         </div>
       </div>
       <div class="card">
-        <div class="card-head"><h3>llama-server 日志（最近 12 行）</h3></div>
+        <div class="card-head"><h3><Icon name="logs" :size="16" />llama-server 日志（最近 12 行）</h3></div>
         <pre class="copybox" style="white-space: pre-wrap; max-height: 260px; overflow: auto">{{ (health.log_tail || []).join('\n') || '（暂无输出）' }}</pre>
       </div>
     </div>
 
     <div class="card">
       <div class="card-head">
-        <h3>硬件参数推荐（纯算术，可核对）</h3>
+        <h3><Icon name="zap" :size="16" />硬件参数推荐（纯算术，可核对）</h3>
         <div class="spacer"></div>
         <select v-model="purpose" style="max-width: 150px">
           <option v-for="p in purposes" :key="p.v" :value="p.v">{{ p.l }}</option>
@@ -594,7 +628,7 @@ onMounted(async () => {
       <div class="row wrap" style="margin-bottom: 10px">
         <select v-model="recoModel" style="max-width: 320px">
           <option value="">（选择已扫描的模型）</option>
-          <option v-for="m in models" :key="m.id" :value="m.id">{{ m.id }}</option>
+          <option v-for="m in models" v-show="!isAttachment(m)" :key="m.id" :value="m.id">{{ m.id }}</option>
         </select>
         <input v-model="manualPath" placeholder="或直接填本地 .gguf 文件路径（可读取结构参数，推荐更准）" />
         <button class="sm" :disabled="busy === 'inspect'" @click="inspect">解析文件</button>

@@ -172,6 +172,43 @@ n_gpu_layers  31 / 32
 
 手机端：**Base URL 填 `http://<局域网IP>:8080/v1`，API Key 留空**即可，任何 OpenAI 客户端零改代码。
 
+## 7.1 生图与图生图（stable-diffusion.cpp）
+
+> 当前版本已做**软回退**：生图入口与设置区默认隐藏，本机 `image.enabled=false`；源码、预设与识图相关模型分类全部保留。若要恢复，把 `frontend/src/store.js` 里的 `IMAGE_FEATURE_ENABLED` 改为 `true`，并把配置里的 `image.enabled` 设回 `true` 即可。
+
+左侧「生图」页走**独立的 sd.cpp 引擎**（`sd-server.exe`），与文本模型不同进程、不同模型格式。
+8GB 显存下两者不能同时进显存，程序会自动互斥切换：启动生图先卸载文本模型，加载文本模型先停生图引擎。
+
+| 能力 | 说明 |
+| --- | --- |
+| `POST /v1/images/generations` | OpenAI 兼容生图；`prompt` / `size` / `n` / `output_format`，扩展参数经 `<sd_cpp_extra_args>` 透传 |
+| 图生图（img2img） | 请求加 `init_image`（base64 或 data URL）+ `strength`（0~1 重绘强度）即基于底图生成；前端支持选图 / 粘贴截图 / 「二次修改」上次结果 |
+| `GET /v1/images/files/{name}` | 生成图片落盘后的局域网静态访问（需网关运行中） |
+| 响应 | `data[].b64_json`（兼容 OpenAI 客户端）+ `data[].url`（局域网链接）+ `data[].file_name` |
+
+**把图发到手机**：生图结果点「发到手机」出现二维码 + 链接，手机与本机在同一 WiFi、且**网关已启动**时，
+扫码即可打开 / 长按保存。图片存到 `%APPDATA%/AIRunner/images`（可在设置 → 生图引擎改 `output_dir`），
+自动清理只保留最近 200 张。若网关未启动，链接无法访问（手机本就通过网关接入，需先启动网关）。
+
+首次使用需在「设置 → 生图引擎」启用并填 `sd-server.exe` 路径与模型目录；程序不代为下载引擎 / 模型权重。
+
+### 生图模型预设（多模型切换）
+
+「生图」页顶部可一键切换预置的模型方案，切换会自动改写模型路径 / 额外启动参数 / 默认出图参数，并在引擎运行时用新模型重启：
+
+| 预设 | 类型 | 组成 | 特点 |
+| --- | --- | --- | --- |
+| SD 1.5 | 单文件 | `v1-5-pruned-emaonly.safetensors` | 几十秒出图，显存占用低，适合快速试提示词 |
+| Qwen-Image 2.1 | 多组件 | 扩散主干 GGUF + Qwen3VL-8B 文本编码器 + Qwen-Image 2.1 专用 VAE | 20B 级高质量，需 CPU offload，出图分钟级；CFG 6 / Euler / 1024×1024 |
+
+- 多组件模型走 `--diffusion-model` + `--llm` + `--vae`（不是 `-m`），由预设的 `extra_args` 承载；
+  前缀缓存用 `--model-args qwen_image_2_1_prefix_cache_type=q8_0` 省显存。
+- Qwen-Image 2.1 的 VAE 必须专用（与老 Qwen-Image / Wan 2.2 不通用）；文本编码器即对话用的
+  `Qwen3VL-8B-Instruct-Q4_K_M.gguf`，删除它会导致生图失败。图生图编辑另需 `--llm_vision`（mmproj）。
+- 预设存在本机配置 `image.profiles`（不在代码库），可在配置文件里增删；切到某预设后其字段写入
+  `image.model_path` / `image.extra_args` 主字段。默认出图尺寸 / 步数 / CFG / 采样器也随预设切换。
+- 图生图（img2img）对 Qwen-Image 这类多组件模型需额外加载视觉权重（`--llm_vision`），当前预设只配了文生图三件套。
+
 ## 8. 已知取舍与边界（有意为之）
 
 | 项 | 说明 |

@@ -169,6 +169,7 @@ export const api = {
   imageModels: () => request('/api/v1/image/models'),
   imageStart: (model) => request('/api/v1/image/start', { method: 'POST', body: { model }, timeout: 330000 }),
   imageStop: () => request('/api/v1/image/stop', { method: 'POST' }),
+  imageUseProfile: (id) => request('/api/v1/image/profile', { method: 'POST', body: { id } }),
   imageGenerate: (payload) =>
     request('/api/v1/image/generate', { method: 'POST', body: payload, timeout: 600000 }),
 }

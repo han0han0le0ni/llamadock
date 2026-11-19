@@ -451,6 +451,21 @@ func (s *Server) Handler() http.Handler {
 		}
 		writeJSON(w, 200, s.core.ImageStatus(r.Context()))
 	})
+	// 切换生图模型预设（SD1.5 / Qwen-Image 等）：写回配置、停旧引擎，前端随后重新启动。
+	mux.HandleFunc("POST /api/v1/image/profile", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID string `json:"id"`
+		}
+		if !s.decode(w, r, &req) {
+			return
+		}
+		out, err := s.core.ImageUseProfile(r.Context(), req.ID)
+		if err != nil {
+			writeErr(w, 400, "image_error", err.Error())
+			return
+		}
+		writeJSON(w, 200, out)
+	})
 	// 前端生图页直接调用：把 sd-server 的响应转成 JSON（图片 base64 在 data[].b64_json）
 	mux.HandleFunc("POST /api/v1/image/generate", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -461,6 +476,8 @@ func (s *Server) Handler() http.Handler {
 			CfgScale       float64 `json:"cfg_scale"`
 			Seed           int64   `json:"seed"`
 			Sampler        string  `json:"sampler"`
+			InitImage      string  `json:"init_image"`
+			Strength       float64 `json:"strength"`
 		}
 		if !s.decode(w, r, &req) {
 			return
@@ -468,6 +485,7 @@ func (s *Server) Handler() http.Handler {
 		resp, err := s.core.ImageGenerate(r.Context(), sdcpp.GenerateRequest{
 			Prompt: req.Prompt, NegativePrompt: req.NegativePrompt, Size: req.Size,
 			Steps: req.Steps, CfgScale: req.CfgScale, Seed: req.Seed, Sampler: req.Sampler,
+			InitImage: req.InitImage, Strength: req.Strength,
 		})
 		if err != nil {
 			writeErr(w, 400, "image_error", err.Error())
@@ -475,9 +493,13 @@ func (s *Server) Handler() http.Handler {
 		}
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
+		out, err := s.core.EnrichImageResponse(body)
+		if err != nil {
+			out = body
+		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(resp.StatusCode)
-		_, _ = w.Write(body)
+		_, _ = w.Write(out)
 	})
 
 	// 静态资源（同一份前端）

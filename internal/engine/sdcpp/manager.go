@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -61,27 +62,42 @@ type Manager struct {
 	logTail   []string
 	logFile   *os.File
 
-	hc *http.Client
+	hc       *http.Client
+	progress GenProgress
+}
+
+// GenProgress 一次生图任务的实时进度（从 sd-server 的 verbose 进度条日志解析）。
+// sd-server 的 OpenAI 接口不暴露进度，但它会在采样时向 stderr/stdout 打印
+// 形如 "45/80 - 6.28it/s - ETA 00:35" 的进度条（用 \r 刷新），这里解析出来给前端轮询展示。
+type GenProgress struct {
+	Step      int     `json:"step"`       // 当前采样步
+	Total     int     `json:"total"`      // 总步数
+	Speed     float64 `json:"speed"`      // 速度数值
+	SpeedUnit string  `json:"speed_unit"` // "it/s" 或 "s/it"
+	ETA       string  `json:"eta"`        // 剩余时间 MM:SS，空表示未知
+	Percent   int     `json:"percent"`    // 0-100
+	Stage     string  `json:"stage,omitempty"` // "sampling" / "decoding" 等
 }
 
 // Status 进程状态快照（JSON 直接给前端）。
 type Status struct {
-	Running    bool     `json:"running"`
-	PID        int      `json:"pid"`
-	Port       int      `json:"port"`
-	Endpoint   string   `json:"endpoint"`
-	Model      string   `json:"model"`
-	ModelPath  string   `json:"model_path"`
-	BinPath    string   `json:"bin_path"`
-	UptimeSec  int64    `json:"uptime_sec"`
-	RSSMB      int      `json:"rss_mb"`
-	CmdLine    string   `json:"cmd_line"`
-	Args       []string `json:"args"`
-	LogPath    string   `json:"log_path"`
-	LogTail    []string `json:"log_tail,omitempty"`
-	LastError  string   `json:"last_error,omitempty"`
-	Detected   string   `json:"detected"`    // 探测到的 sd-server.exe 路径
-	ModelsRoot string   `json:"models_root"` // 当前模型目录
+	Running    bool        `json:"running"`
+	PID        int         `json:"pid"`
+	Port       int         `json:"port"`
+	Endpoint   string      `json:"endpoint"`
+	Model      string      `json:"model"`
+	ModelPath  string      `json:"model_path"`
+	BinPath    string      `json:"bin_path"`
+	UptimeSec  int64       `json:"uptime_sec"`
+	RSSMB      int         `json:"rss_mb"`
+	CmdLine    string      `json:"cmd_line"`
+	Args       []string    `json:"args"`
+	LogPath    string      `json:"log_path"`
+	LogTail    []string    `json:"log_tail,omitempty"`
+	LastError  string      `json:"last_error,omitempty"`
+	Detected   string      `json:"detected"`    // 探测到的 sd-server.exe 路径
+	ModelsRoot string      `json:"models_root"` // 当前模型目录
+	Progress   GenProgress `json:"progress"`    // 当前生图进度（无任务时为全 0）
 }
 
 // New 创建管理器。
@@ -174,6 +190,7 @@ func (m *Manager) Status() Status {
 		LastError:  m.lastErr,
 		Detected:   Detect(),
 		ModelsRoot: m.cfg.ModelDir,
+		Progress:   m.progress,
 	}
 	if st.Port == 0 {
 		st.Port = m.cfg.Port
@@ -266,6 +283,12 @@ func (m *Manager) Start(ctx context.Context, modelPath string) error {
 	if cfg.OffloadToCPU {
 		args = append(args, "--offload-to-cpu")
 	}
+	// 用 verbose 日志级别：sd-server 会在采样时逐 step 打印进度条（N/M - Xit/s - ETA MM:SS），
+	// 我们解析这些行把实时进度暴露给前端（OpenAI 接口本身不返回进度）。
+	// 放在 ExtraArgs 之前，允许用户通过 extra_args 里的 --log-level 覆盖。
+	if !hasLogLevelFlag(cfg.ExtraArgs) {
+		args = append(args, "--log-level", "verbose")
+	}
 	if extra := strings.TrimSpace(cfg.ExtraArgs); extra != "" {
 		args = append(args, splitArgs(extra)...)
 	}
@@ -300,6 +323,7 @@ func (m *Manager) Start(ctx context.Context, modelPath string) error {
 	m.running = true
 	m.lastErr = ""
 	m.logTail = nil
+	m.progress = GenProgress{}
 	m.exited = make(chan struct{})
 	logPath := ""
 	if cfg.LogDir != "" {
@@ -338,6 +362,10 @@ func (m *Manager) pump(r io.Reader) {
 		m.logTail = append(m.logTail, line)
 		if len(m.logTail) > 80 {
 			m.logTail = m.logTail[len(m.logTail)-80:]
+		}
+		// 解析 verbose 进度条行，更新当前生图进度（取一行里最后一次刷新）。
+		if p, ok := parseProgressLine(line); ok {
+			m.progress = p
 		}
 		onLog := m.cfg.OnLog
 		f := m.logFile
@@ -423,12 +451,20 @@ func (m *Manager) Stop(ctx context.Context) error {
 	return nil
 }
 
+// ResetProgress 清空当前进度（发起新一次生图、或引擎重启时调用）。
+func (m *Manager) ResetProgress() {
+	m.mu.Lock()
+	m.progress = GenProgress{}
+	m.mu.Unlock()
+}
+
 // Generate 转发 OpenAI 兼容的生图请求到 sd-server。
 // 请求体由调用方（网关）组装好，这里只做纯转发，响应原样回传（图片是 base64）。
 func (m *Manager) Generate(ctx context.Context, path string, body []byte, hdr http.Header) (*http.Response, error) {
 	if !m.Running() {
 		return nil, fmt.Errorf("生图引擎未运行")
 	}
+	m.ResetProgress()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.Endpoint()+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -571,6 +607,54 @@ func splitArgs(s string) []string {
 	return out
 }
 
+// hasLogLevelFlag 判断额外参数里是否已指定了日志级别（避免重复添加 --log-level）。
+func hasLogLevelFlag(extra string) bool {
+	toks := splitArgs(extra)
+	for _, t := range toks {
+		if t == "--log-level" || t == "-v" || t == "--verbose" || strings.HasPrefix(t, "--log-level=") {
+			return true
+		}
+	}
+	return false
+}
+
+// progressRe 匹配 sd-server verbose 进度条，例如：
+//
+//	"45/80 -   6.28it/s - ETA 00:35"
+//	"  1/80 -  25.45s/it - ETA 33:30"
+//	" 80/80 -   6.04it/s"
+//	"| 12/20 - 3.2it/s - ETA 00:05 |====>         |"
+var progressRe = regexp.MustCompile(`(\d+)\s*/\s*(\d+)\s*-\s*([0-9.]+)\s*(it/s|s/it)(?:\s*-\s*ETA\s*([0-9:]+))?`)
+
+// parseProgressLine 从一行日志里提取最新的一条进度。
+// sd-server 用 \r 刷新进度条，Scanner 按 \n 分割，所以一行里可能有多次刷新的片段；
+// 用 FindAll 取最后一条即最新进度。找不到返回 false。
+func parseProgressLine(line string) (GenProgress, bool) {
+	ms := progressRe.FindAllStringSubmatch(line, -1)
+	if len(ms) == 0 {
+		return GenProgress{}, false
+	}
+	m := ms[len(ms)-1]
+	step, _ := strconv.Atoi(strings.TrimSpace(m[1]))
+	total, _ := strconv.Atoi(strings.TrimSpace(m[2]))
+	speed, _ := strconv.ParseFloat(strings.TrimSpace(m[3]), 64)
+	if total <= 0 || step < 0 {
+		return GenProgress{}, false
+	}
+	pct := 0
+	if total > 0 {
+		pct = step * 100 / total
+		if pct > 100 {
+			pct = 100
+		}
+	}
+	return GenProgress{
+		Step: step, Total: total, Speed: speed,
+		SpeedUnit: m[4], ETA: strings.TrimSpace(m[5]),
+		Percent: pct, Stage: "sampling",
+	}, true
+}
+
 func samePath(a, b string) bool {
 	if a == "" || b == "" {
 		return false
@@ -597,6 +681,10 @@ type GenerateRequest struct {
 	Seed           int64   `json:"seed,omitempty"`
 	Sampler        string  `json:"sampler,omitempty"`
 	OutputFormat   string  `json:"output_format,omitempty"`
+	// 图生图（img2img）：底图与重绘强度。底图支持 raw base64 或 data URL。
+	// 为空时走纯文生图；非空时经 sd_cpp_extra_args 下发 init_image + strength。
+	InitImage string  `json:"init_image,omitempty"`
+	Strength  float64 `json:"strength,omitempty"` // 0~1，越大越"推倒重来"；0 表示默认 0.75
 }
 
 // BuildOpenAIBody 把扩展请求转成 sd-server /v1/images/generations 的请求体。
@@ -636,6 +724,13 @@ func BuildOpenAIBody(req GenerateRequest, defW, defH, defSteps int, defCfg float
 	extra["sample_params"] = sp
 	if req.Seed != 0 {
 		extra["seed"] = req.Seed
+	}
+	// 图生图：init_image（base64/data URL）+ strength 走 native 字段下发。
+	if img := strings.TrimSpace(req.InitImage); img != "" {
+		extra["init_image"] = img
+		if req.Strength > 0 {
+			extra["strength"] = req.Strength
+		}
 	}
 	extraJSON, _ := json.Marshal(extra)
 	prompt = prompt + " <sd_cpp_extra_args>" + string(extraJSON) + "</sd_cpp_extra_args>"

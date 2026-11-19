@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { api } from '../api'
 import { state, notify, refreshParams } from '../store'
 import ParamRow from '../components/ParamRow.vue'
+import Icon from '../components/Icon.vue'
 import { chatTemplates, findTemplate, identifyTemplate } from '../chatTemplates'
 
 const draft = reactive({})
@@ -235,7 +236,7 @@ onMounted(refreshParams)
     <!-- Chat 模板快捷套用 -->
     <div class="card tight">
       <div class="row wrap">
-        <span class="badge info">Chat 模板</span>
+        <span class="badge info"><Icon name="sparkles" :size="12" />Chat 模板</span>
         <div class="tpl-current">
           <div class="row wrap" style="gap: 6px">
             <span class="hint">当前使用：</span>
@@ -315,7 +316,7 @@ onMounted(refreshParams)
     <!-- 常用 15 项 -->
     <div class="card" v-if="!keyword && !showOnlyChanged">
       <div class="card-head">
-        <h3>常用参数（15 项）</h3>
+        <h3><Icon name="zap" :size="16" />常用参数（15 项）</h3>
         <span class="badge ok">默认展开</span>
       </div>
       <ParamRow v-for="p in commonRows()" :key="'c-' + p.key" :param="p" v-model="draft[p.key]" />

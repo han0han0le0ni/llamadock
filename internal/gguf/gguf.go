@@ -47,6 +47,15 @@ type Meta struct {
 	Capabilities []string `json:"capabilities,omitempty"`
 	// MMProj 是同目录自动发现的视觉投影文件路径（仅视觉模型）。
 	MMProj string `json:"mmproj,omitempty"`
+	// Type 来自 general.type（如 mmproj），供分类使用。
+	Type string `json:"type,omitempty"`
+	// Kind 是该文件的角色分类，供界面决定"能不能对话/怎么展示"：
+	//   chat       —— 纯文本 / 对话 LLM（含推理、工具调用等）
+	//   vlm        —— 视觉语言模型，可对话+识图
+	//   embedding  —— 向量/嵌入模型
+	//   mmproj     —— 视觉投影塔附件（arch=clip, type=mmproj），不能单独加载
+	//   diffusion  —— 生图/视频扩散模型（qwen_image/flux/sd/wan…），由 sd.cpp 用
+	Kind string `json:"kind,omitempty"`
 }
 
 // 视觉相关标签：只要在 general.tags 里出现，就认为该模型声明了图文能力。
@@ -61,6 +70,56 @@ func isVisionArch(arch string) bool {
 	a := strings.ToLower(arch)
 	return a == "qwen3vl" || a == "qwen2vl" || a == "qwen25vl" ||
 		a == "llava" || a == "llava-qwen2" || a == "minicpmv" || a == "gemma3"
+}
+
+// diffusionArchPrefixes 是 sd.cpp / diffusion 类模型的 general.architecture 前缀。
+// 这些是"生图/视频"扩散主干或 VAE，不是 llama.cpp 能加载的对话模型：
+// 若混进模型列表并尝试加载，llama-server 会报 unknown model type。
+// 用前缀匹配（大小写不敏感），覆盖 stable-diffusion.cpp 支持的各家架构。
+var diffusionArchPrefixes = []string{
+	"qwen_image", "qwen-image", // Qwen-Image / Qwen-Image 2.1
+	"flux", "sd", "sdxl", "sd3", // Stable Diffusion 系列
+	"wan", "ltx", "hunyuan_video", // 视频生成
+	"z_image", "chroma", "hidream", "pixart", "omnigen",
+	"mochi", "krea", "ideogram", "lumina", "cogview", "kolors", "aura",
+}
+
+// isDiffusionArch 判断架构是否属于扩散类（生图/视频），而非对话 LLM。
+func isDiffusionArch(arch string) bool {
+	a := strings.ToLower(strings.TrimSpace(arch))
+	for _, p := range diffusionArchPrefixes {
+		if strings.HasPrefix(a, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// ClassifyKind 根据架构、general.type 与文件名判定文件角色。
+// 优先级：mmproj 附件 > diffusion 扩散模型 > embedding > vlm > chat。
+func ClassifyKind(arch, typ, name string) string {
+	a := strings.ToLower(strings.TrimSpace(arch))
+	t := strings.ToLower(strings.TrimSpace(typ))
+	n := strings.ToLower(strings.TrimSpace(name))
+
+	// 视觉投影塔：general.type=mmproj，或文件名以 mmproj 开头/含 mmproj-
+	// （arch 通常是 clip，仅靠 arch 会把它当文本编码器）。
+	if t == "mmproj" || strings.HasPrefix(n, "mmproj") || strings.Contains(n, "mmproj-") {
+		return "mmproj"
+	}
+	// 扩散类生图/视频模型。
+	if isDiffusionArch(a) {
+		return "diffusion"
+	}
+	// 嵌入 / 向量模型。
+	if strings.Contains(a, "bert") || strings.Contains(a, "embed") || t == "embedding" {
+		return "embedding"
+	}
+	// 视觉语言模型：可对话 + 识图。
+	if isVisionArch(a) {
+		return "vlm"
+	}
+	return "chat"
 }
 
 // templateVisionMarkers 是 chat_template 里能证明模型支持图片输入的强标记。
@@ -297,6 +356,7 @@ func Parse(path string) (*Meta, error) {
 	if m.Arch == "" {
 		m.Arch = "llama"
 	}
+	m.Type = str(raw, "general.type")
 	m.Name = str(raw, "general.name")
 	// 原生对话模板：主流键是 tokenizer.chat_template，少数模型用 chat_template。
 	// 这是模型训练时用的模板，含正确的角色标记与 EOS，比手写模板可靠。
@@ -335,8 +395,12 @@ func Parse(path string) (*Meta, error) {
 	// general.tags 是字符串数组（LLM 发布者声明的能力/用途标签）。
 	// 读取它用于展示能力徽章与识别视觉模型（如 qwen35 变体靠 image-text-to-text 标记）。
 	m.Tags = stringArray(raw, "general.tags")
+	m.Kind = ClassifyKind(m.Arch, m.Type, filepath.Base(path))
 	m.Capabilities = CapabilitiesOf(m.Arch, m.Tags, m.ChatTemplate)
-	if m.IsVision() {
+	// 扩散/生图模型与 mmproj 附件都不该有对话能力标签，也不做 mmproj 自动配对。
+	if m.Kind == "diffusion" || m.Kind == "mmproj" {
+		m.Capabilities = nil
+	} else if m.IsVision() {
 		m.MMProj = findMMProjInDir(path)
 	}
 

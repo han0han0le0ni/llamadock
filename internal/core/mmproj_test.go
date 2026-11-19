@@ -25,6 +25,23 @@ func TestFindMMProj(t *testing.T) {
 	}
 }
 
+func TestFindMMProjLLMBasedVLM(t *testing.T) {
+	// DeepSeek-V4-Pro 元数据标成 llm，但实际配了视觉塔；文件名高度吻合时应挂上。
+	dir := t.TempDir()
+	model := filepath.Join(dir, "DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic.i1-Q4_K_M.gguf")
+	proj := filepath.Join(dir, "DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic.mmproj-Q8_0.gguf")
+	other := filepath.Join(dir, "mmproj-Qwen3VL-8B-Instruct-F16.gguf")
+	for _, p := range []string{model, proj, other} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := findMMProj(engine.Model{Path: model, Type: "llm", Arch: "qwen35"})
+	if got != proj {
+		t.Fatalf("llm 但文件名强匹配的视觉模型应挂 mmproj，got=%s want=%s", got, proj)
+	}
+}
+
 func TestFindMMProjSkipsTextModel(t *testing.T) {
 	dir := t.TempDir()
 	model := filepath.Join(dir, "qwen2.5-7b-q4_k_m.gguf")

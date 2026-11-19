@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { api } from '../api'
 import { state, notify, refreshNetwork, refreshStatus, refreshConfig, engineLabel } from '../store'
 import QrCode from '../components/QrCode.vue'
+import Icon from '../components/Icon.vue'
 
 const tab = ref('curl')
 const testing = ref(false)
@@ -116,7 +117,10 @@ onMounted(async () => {
           {{ st && st.gateway_running ? '运行中' : '已停止' }}
         </span>
         <div class="spacer"></div>
-        <button class="primary" @click="toggle">{{ st && st.gateway_running ? '停止网关' : '启动网关' }}</button>
+        <button class="primary" @click="toggle">
+          <Icon :name="st && st.gateway_running ? 'stop' : 'play'" :size="14" :stroke="2.2" />
+          {{ st && st.gateway_running ? '停止网关' : '启动网关' }}
+        </button>
       </div>
       <div class="grid cols-3">
         <div>
@@ -141,8 +145,8 @@ onMounted(async () => {
 
     <div class="grid cols-2">
       <div class="card">
-        <div class="card-head"><h3>设备接入</h3><div class="spacer"></div>
-          <button class="sm" @click="refreshNetwork">刷新</button>
+        <div class="card-head"><h3><Icon name="globe" :size="16" />设备接入</h3><div class="spacer"></div>
+          <button class="sm" @click="refreshNetwork"><Icon name="refresh" :size="13" />刷新</button>
         </div>
         <div v-if="net" class="row wrap" style="gap: 18px; align-items: flex-start">
           <QrCode :text="net.base_url" :size="168" />
@@ -150,7 +154,7 @@ onMounted(async () => {
             <div class="hint">手机 AI 客户端只填 Base URL，API Key 留空</div>
             <div class="row" style="margin: 8px 0">
               <input readonly :value="net.base_url" />
-              <button class="sm" @click="copy(net.base_url)">复制</button>
+              <button class="sm" @click="copy(net.base_url)"><Icon name="copy" :size="13" />复制</button>
             </div>
             <div class="row wrap" style="gap: 6px">
               <button class="sm" @click="tab = 'curl'">cURL</button>
@@ -159,7 +163,7 @@ onMounted(async () => {
             </div>
             <pre class="copybox">{{ tab === 'python' ? net.python : tab === 'node' ? net.node : net.curl }}</pre>
             <button class="sm" style="margin-top: 8px" @click="copy(tab === 'python' ? net.python : tab === 'node' ? net.node : net.curl)">
-              复制示例
+              <Icon name="copy" :size="13" />复制示例
             </button>
             <div class="hint" style="margin-top: 8px">{{ net.tip }}</div>
             <div class="hint" style="margin-top: 4px">
@@ -173,7 +177,7 @@ onMounted(async () => {
       </div>
 
       <div class="card">
-        <div class="card-head"><h3>多格式响应</h3></div>
+        <div class="card-head"><h3><Icon name="terminal" :size="16" />多格式响应</h3></div>
         <table>
           <tbody>
             <tr v-for="f in formatTips" :key="f.k">
@@ -191,7 +195,7 @@ onMounted(async () => {
 
     <div class="card">
       <div class="card-head">
-        <h3>试运行面板</h3>
+        <h3><Icon name="activity" :size="16" />试运行面板</h3>
         <div class="spacer"></div>
         <select v-model="testModel" style="max-width: 260px">
           <option value="">（自动选择已加载模型）</option>
@@ -200,9 +204,9 @@ onMounted(async () => {
       </div>
       <div class="row">
         <input v-model="prompt" @keyup.enter="runTest" />
-        <button :disabled="testing" @click="runTest">直连引擎</button>
+        <button :disabled="testing" @click="runTest"><Icon name="cpu" :size="14" />直连引擎</button>
         <button class="primary" :disabled="testing || !(st && st.gateway_running)" @click="runViaGateway">
-          经网关
+          <Icon name="globe" :size="14" />经网关
         </button>
       </div>
       <div class="hint" style="margin-top: 8px">

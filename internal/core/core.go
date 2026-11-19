@@ -991,6 +991,13 @@ func (c *Core) LoadModelWith(ctx context.Context, id string, ctxLen int, overrid
 			Type: "llm",
 		}
 	}
+	// 角色拦截：有些 .gguf 不是对话模型，加载只会失败或毫无意义。
+	switch m.Type {
+	case "mmproj":
+		return fmt.Errorf("这是视觉投影附件（mmproj），不能单独加载。它是配套主模型的\"眼睛\"，在选择视觉模型（如 Qwen3VL）加载时会自动挂载")
+	case "diffusion":
+		return fmt.Errorf("这是扩散生图模型，不能用文本推理引擎加载。请到「生图」页使用它（需 stable-diffusion.cpp 引擎）")
+	}
 	// 显存避让：若生图引擎正在占用显存，先停掉再加载文本模型（8GB 卡两者不能同时进显存）。
 	c.EnsureSDStopped(ctx)
 	if err := c.loadEngineModel(ctx, m, ctxLen, override); err != nil {
@@ -1090,25 +1097,25 @@ func matchAutoTemplate(name, generalName, modelKey string, rules []config.Templa
 	return nil
 }
 
-// findMMProj 为 VLM 在主模型同目录寻找配套的 mmproj-*.gguf。
+// findMMProj 在主模型同目录寻找配套的 mmproj-*.gguf。
 // llama.cpp 把视觉塔单独放在 mmproj 文件里；只加载主模型时图片输入会被忽略或报错。
 // 多个候选时选与主模型文件名公共前缀最长的那个（如 mmproj-Qwen3VL-8B-Instruct-F16.gguf）。
+// 除了标为 vlm 的模型，也兼容元数据误标为 llm 但实际配套了视觉塔的模型
+// （如 DeepSeek-V4-Pro-Qwen3.5-9B）；这类靠文件名强匹配，避免给纯文本模型误挂。
 func findMMProj(m engine.Model) string {
 	if m.Path == "" {
 		return ""
 	}
 	arch := strings.ToLower(m.Arch)
 	typ := strings.ToLower(m.Type)
-	if typ != "vlm" && !strings.Contains(arch, "vl") && !strings.Contains(arch, "vision") {
-		return ""
-	}
+	isVLM := typ == "vlm" || strings.Contains(arch, "vl") || strings.Contains(arch, "vision")
 	dir := filepath.Dir(m.Path)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return ""
 	}
 	base := strings.ToLower(strings.TrimSuffix(filepath.Base(m.Path), filepath.Ext(m.Path)))
-	best, bestScore := "", -1
+	best, bestStem, bestScore := "", "", -1
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -1122,7 +1129,21 @@ func findMMProj(m engine.Model) string {
 		stem := strings.Trim(strings.ReplaceAll(lower, "mmproj", ""), "-_.")
 		score := commonPrefixLen(stem, base)
 		if score > bestScore {
-			best, bestScore = filepath.Join(dir, name), score
+			best, bestStem, bestScore = filepath.Join(dir, name), stem, score
+		}
+	}
+	if best == "" {
+		return ""
+	}
+	// 纯文本模型（元数据标成 llm）也可能配了视觉塔，但必须文件名高度吻合才挂，
+	// 否则会给同目录里任意一个无关 llm 误挂 mmproj，反而导致加载失败。
+	if !isVLM {
+		ref := len(bestStem)
+		if len(base) < ref {
+			ref = len(base)
+		}
+		if ref == 0 || bestScore < 4 || bestScore*100 < ref*60 {
+			return ""
 		}
 	}
 	return best

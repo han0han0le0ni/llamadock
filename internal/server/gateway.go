@@ -15,6 +15,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -112,6 +114,7 @@ func (g *Gateway) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/completions", g.handleCompletions("/v1/completions"))
 	mux.HandleFunc("POST /v1/embeddings", g.handleCompletions("/v1/embeddings"))
 	mux.HandleFunc("POST /v1/images/generations", g.handleImageGenerations)
+	mux.HandleFunc("GET /v1/images/files/{name}", g.handleImageFile)
 	mux.HandleFunc("GET /v1/models", g.handleModels)
 	mux.HandleFunc("GET /healthz", g.handleHealthz)
 	mux.HandleFunc("GET /readyz", g.handleReadyz)
@@ -220,14 +223,48 @@ func (g *Gateway) handleImageGenerations(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	defer resp.Body.Close()
-	// 透传 sd-server 的响应（含 data[].b64_json）
-	for k, vals := range resp.Header {
-		for _, v := range vals {
-			w.Header().Add(k, v)
-		}
+	// 读取响应后落盘并补充 data[].url（手机端可直接打开的局域网链接），保留 b64_json。
+	body, err = io.ReadAll(resp.Body)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "image_engine_error", "读取生图响应失败："+err.Error(), "read_body")
+		return
 	}
+	out, err := g.core.EnrichImageResponse(body)
+	if err != nil {
+		// 落盘失败不影响生图结果本身，退回原始响应
+		out = body
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+	_, _ = w.Write(out)
+}
+
+// handleImageFile 提供已落盘生图文件的局域网静态访问（给手机扫码/打开用）。
+// 文件名由本程序生成（gen-*.png），这里做白名单校验避免路径穿越。
+func (g *Gateway) handleImageFile(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" || strings.ContainsAny(name, `/\\`) || !strings.HasPrefix(name, "gen-") ||
+		(filepath.Ext(name) != ".png" && filepath.Ext(name) != ".jpg" && filepath.Ext(name) != ".webp") {
+		writeErr(w, http.StatusNotFound, "not_found", "图片不存在", "")
+		return
+	}
+	path := filepath.Join(g.core.ImageOutputDir(), name)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "not_found", "图片不存在或已被清理", "")
+		return
+	}
+	switch filepath.Ext(name) {
+	case ".jpg":
+		w.Header().Set("Content-Type", "image/jpeg")
+	case ".webp":
+		w.Header().Set("Content-Type", "image/webp")
+	default:
+		w.Header().Set("Content-Type", "image/png")
+	}
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
 }
 
 // handleCompletions 处理推理请求：参数合并 → 转发 → 多格式输出 → 记账。

@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { api } from '../api'
 import { state, notify, refreshRequests, refreshLogs } from '../store'
+import Icon from '../components/Icon.vue'
 
 const tab = ref('requests')
 const level = ref('')
@@ -139,9 +140,9 @@ onMounted(async () => {
             <option :value="404">404</option>
             <option :value="503">503</option>
           </select>
-          <button class="sm" @click="load">查询</button>
-          <button class="sm" @click="exportCSV">导出 CSV</button>
-          <button class="sm danger" @click="clearAll">清空</button>
+          <button class="sm primary" @click="load"><Icon name="search" :size="13" />查询</button>
+          <button class="sm" @click="exportCSV"><Icon name="download" :size="13" />导出 CSV</button>
+          <button class="sm danger" @click="clearAll"><Icon name="close" :size="13" />清空</button>
         </template>
         <template v-else>
           <select v-model="level" style="max-width: 140px">
@@ -151,8 +152,8 @@ onMounted(async () => {
             <option value="error">error</option>
             <option value="debug">debug</option>
           </select>
-          <button class="sm" @click="loadLogs">刷新</button>
-          <button class="sm danger" @click="api.clearLogs().then(loadLogs)">清空</button>
+          <button class="sm" @click="loadLogs"><Icon name="refresh" :size="13" />刷新</button>
+          <button class="sm danger" @click="api.clearLogs().then(loadLogs)"><Icon name="close" :size="13" />清空</button>
         </template>
       </div>
 

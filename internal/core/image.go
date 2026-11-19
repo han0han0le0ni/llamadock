@@ -12,26 +12,30 @@ import (
 	"strings"
 	"time"
 
+	"airunner/internal/config"
 	"airunner/internal/engine/sdcpp"
 )
 
 // ImageStatusDTO 生图引擎状态（给前端）。
 type ImageStatusDTO struct {
-	Enabled   bool          `json:"enabled"`
-	Available bool          `json:"available"` // 是否探测到 sd-server.exe
-	Running   bool          `json:"running"`
-	Online    bool          `json:"online"`
-	Status    sdcpp.Status  `json:"process"`
-	Defaults  ImageDefaults `json:"defaults"`
-	Error     string        `json:"error,omitempty"`
+	Enabled       bool                   `json:"enabled"`
+	Available     bool                   `json:"available"` // 是否探测到 sd-server.exe
+	Running       bool                   `json:"running"`
+	Online        bool                   `json:"online"`
+	Status        sdcpp.Status           `json:"process"`
+	Defaults      ImageDefaults          `json:"defaults"`
+	Error         string                 `json:"error,omitempty"`
+	Profiles      []config.ImageProfile  `json:"profiles,omitempty"`      // 生图模型预设列表
+	ActiveProfile string                 `json:"active_profile,omitempty"` // 当前激活的预设 id
 }
 
 // ImageDefaults 前端表单默认值（来自配置）。
 type ImageDefaults struct {
-	Width  int     `json:"width"`
-	Height int     `json:"height"`
-	Steps  int     `json:"steps"`
-	Cfg    float64 `json:"cfg_scale"`
+	Width   int     `json:"width"`
+	Height  int     `json:"height"`
+	Steps   int     `json:"steps"`
+	Cfg     float64 `json:"cfg_scale"`
+	Sampler string  `json:"sampler,omitempty"`
 }
 
 // ImageStatus 返回生图引擎状态。
@@ -45,11 +49,14 @@ func (c *Core) ImageStatus(ctx context.Context) ImageStatusDTO {
 		Status:    st,
 		Available: st.Detected != "" || strings.TrimSpace(img.ExePath) != "",
 		Defaults: ImageDefaults{
-			Width:  img.DefaultWidth,
-			Height: img.DefaultHeight,
-			Steps:  img.DefaultSteps,
-			Cfg:    img.DefaultCfg,
+			Width:   img.DefaultWidth,
+			Height:  img.DefaultHeight,
+			Steps:   img.DefaultSteps,
+			Cfg:     img.DefaultCfg,
+			Sampler: img.DefaultSampler,
 		},
+		Profiles:      img.Profiles,
+		ActiveProfile: img.ActiveProfile,
 	}
 	if st.LastError != "" {
 		dto.Error = st.LastError
@@ -79,8 +86,10 @@ func (c *Core) ImageStart(ctx context.Context, modelPath string) error {
 	if strings.TrimSpace(modelPath) == "" {
 		modelPath = snap.Image.ModelPath
 	}
-	if strings.TrimSpace(modelPath) == "" {
-		return fmt.Errorf("请先选择生图模型（设置页的模型路径，或启动时传入 model）")
+	// 多组件模型（Qwen-Image / Flux 等）ModelPath 为空，靠 ExtraArgs 传 --diffusion-model/--llm/--vae，
+	// 因此只要配了 ExtraArgs 就允许启动。
+	if strings.TrimSpace(modelPath) == "" && strings.TrimSpace(snap.Image.ExtraArgs) == "" {
+		return fmt.Errorf("请先选择生图模型（设置页的模型路径或额外启动参数，或启动时传入 model）")
 	}
 	// 显存避让：先停文本模型
 	if snap.Image.UnloadLLM && c.llama.Running() {
@@ -94,6 +103,59 @@ func (c *Core) ImageStart(ctx context.Context, modelPath string) error {
 	}
 	c.Log.Info("生图引擎已启动", "model", modelPath, "port", snap.Image.Port)
 	return nil
+}
+
+// ImageUseProfile 激活一个生图模型预设：把该预设的模型路径 / 额外参数 / 默认出图参数
+// 写回 ImageConfig 主字段并持久化（配置订阅会自动把新配置热更新到 sdcpp.Manager）。
+// 若引擎正在运行则先停掉——切换预设后需要重新启动以加载新模型。
+func (c *Core) ImageUseProfile(ctx context.Context, id string) (ImageStatusDTO, error) {
+	snap := c.Cfg.Snapshot()
+	var target *config.ImageProfile
+	for i := range snap.Image.Profiles {
+		if snap.Image.Profiles[i].ID == id {
+			target = &snap.Image.Profiles[i]
+			break
+		}
+	}
+	if target == nil {
+		return c.ImageStatus(ctx), fmt.Errorf("找不到生图预设：%s", id)
+	}
+	cfg, err := c.Cfg.Update(func(cfg *config.Config) {
+		cfg.Image.ModelPath = target.ModelPath
+		cfg.Image.ExtraArgs = target.ExtraArgs
+		cfg.Image.ActiveProfile = target.ID
+		if target.DefaultWidth > 0 {
+			cfg.Image.DefaultWidth = target.DefaultWidth
+		}
+		if target.DefaultHeight > 0 {
+			cfg.Image.DefaultHeight = target.DefaultHeight
+		}
+		if target.DefaultSteps > 0 {
+			cfg.Image.DefaultSteps = target.DefaultSteps
+		}
+		if target.DefaultCfg > 0 {
+			cfg.Image.DefaultCfg = target.DefaultCfg
+		}
+		if target.DefaultSampler != "" {
+			cfg.Image.DefaultSampler = target.DefaultSampler
+		}
+	})
+	if err != nil {
+		return c.ImageStatus(ctx), fmt.Errorf("保存预设失败：%w", err)
+	}
+	// 显式把新配置热更新到 sdcpp 管理器（Cfg.Update 不触发 applyEngineConfig；
+	// 且切换生图预设不应触碰文本引擎，故只更新 sdcpp，不走整套 applyEngineConfig）。
+	if c.sd != nil {
+		c.sd.SetConfig(c.imageConfig(cfg))
+	}
+	// 若引擎在运行，停掉以释放旧模型。
+	if c.sd != nil && c.sd.Running() {
+		if err := c.sd.Stop(ctx); err != nil {
+			c.Log.Warn("切换生图预设时停止旧引擎失败", "error", err)
+		}
+	}
+	c.Log.Info("已切换生图模型预设", "id", target.ID, "name", target.Name, "mode", target.Mode)
+	return c.ImageStatus(ctx), nil
 }
 
 // ImageStop 停止生图引擎。

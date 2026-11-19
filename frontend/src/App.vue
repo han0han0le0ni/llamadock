@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, watch } from 'vue'
-import { state, bootstrap, startPolling, stopPolling, engineLabel } from './store'
+import { state, bootstrap, startPolling, stopPolling, engineLabel, IMAGE_FEATURE_ENABLED } from './store'
 import { api } from './api'
 import { notify } from './store'
 import Dashboard from './views/Dashboard.vue'
@@ -10,21 +10,26 @@ import Service from './views/ServiceView.vue'
 import Logs from './views/LogsView.vue'
 import Settings from './views/SettingsView.vue'
 import Image from './views/ImageView.vue'
+import Icon from './components/Icon.vue'
 
 const nav = [
-  { id: 'dashboard', label: '仪表盘', icon: '◉', comp: Dashboard },
-  { id: 'models', label: '模型', icon: '▣', comp: Models },
-  { id: 'params', label: '参数', icon: '⚙', comp: Params },
-  { id: 'image', label: '生图', icon: '✦', comp: Image },
-  { id: 'service', label: '服务', icon: '⇄', comp: Service },
-  { id: 'logs', label: '日志', icon: '≡', comp: Logs },
-  { id: 'settings', label: '设置', icon: '✳', comp: Settings },
+  { id: 'dashboard', label: '仪表盘', icon: 'dashboard', comp: Dashboard },
+  { id: 'models', label: '模型', icon: 'models', comp: Models },
+  { id: 'params', label: '参数', icon: 'params', comp: Params },
+  ...(IMAGE_FEATURE_ENABLED ? [{ id: 'image', label: '生图', icon: 'image', comp: Image }] : []),
+  { id: 'service', label: '服务', icon: 'service', comp: Service },
+  { id: 'logs', label: '日志', icon: 'logs', comp: Logs },
+  { id: 'settings', label: '设置', icon: 'settings', comp: Settings },
 ]
 
 const current = computed(() => nav.find((n) => n.id === state.view) || nav[0])
 const st = computed(() => state.status)
 
 function go(id) {
+  if (id === 'image' && !IMAGE_FEATURE_ENABLED) {
+    notify('生图功能已停用，识图功能不受影响', 'warn')
+    return
+  }
   state.view = id
   if (typeof location !== 'undefined') {
     location.hash = '#' + id
@@ -34,6 +39,11 @@ function go(id) {
 function syncFromHash() {
   if (typeof location === 'undefined') return
   const id = (location.hash || '').replace(/^#\/?/, '')
+  if (id === 'image' && !IMAGE_FEATURE_ENABLED) {
+    state.view = 'dashboard'
+    location.hash = '#dashboard'
+    return
+  }
   if (nav.some((n) => n.id === id)) {
     state.view = id
   }
@@ -91,37 +101,47 @@ onBeforeUnmount(() => {
         :class="{ active: state.view === n.id }"
         @click="go(n.id)"
       >
-        <span class="icon">{{ n.icon }}</span>
+        <span class="icon"><Icon :name="n.icon" :size="18" /></span>
         <span class="label">{{ n.label }}</span>
         <span v-if="n.id === 'logs' && state.requests.length" class="nav-badge">{{ state.requests.length }}</span>
         <span v-else-if="n.id === 'models' && st" class="nav-badge">{{ st.model_count }}</span>
       </div>
       <div style="flex: 1"></div>
-      <div class="hint" style="padding: 8px; border-top: 1px solid var(--border-soft)">
-        <div class="row" style="gap: 6px">
+      <div class="side-status" style="padding: 12px 8px 2px; border-top: 1px solid var(--border-soft)">
+        <div class="row" style="gap: 8px">
           <span class="dot" :class="st && st.engine.health.online ? 'ok' : 'err'"></span>
-          <span>{{ st && st.engine.health.online ? '引擎在线' : '引擎离线' }} · {{ engineLabel }}</span>
+          <span class="status-line">{{ st && st.engine.health.online ? '引擎在线' : '引擎离线' }}</span>
+          <span class="status-sub">{{ engineLabel }}</span>
         </div>
-        <div class="row" style="gap: 6px; margin-top: 4px">
+        <div class="row" style="gap: 8px; margin-top: 7px">
           <span class="dot" :class="st && st.gateway_running ? 'ok' : 'off'"></span>
-          <span>{{ st && st.gateway_running ? '网关运行中' : '网关已停止' }}</span>
+          <span class="status-line">{{ st && st.gateway_running ? '网关运行中' : '网关已停止' }}</span>
         </div>
       </div>
     </aside>
 
     <main class="main">
       <header class="topbar">
-        <h1>{{ current.label }}</h1>
-        <span v-if="st" class="badge info">{{ engineLabel }}</span>
-        <span v-if="st" class="badge">{{ st.version }}</span>
-        <span v-if="st" class="badge" :class="st.gateway_running ? 'ok' : ''">
-          :{{ st.gateway_addr ? st.gateway_addr.split(':').pop() : '—' }}
-        </span>
-        <span v-if="st && st.hardware" class="badge info">{{ st.hardware_summary }}</span>
+        <h1><Icon :name="current.icon" :size="19" :stroke="2" />{{ current.label }}</h1>
+        <span class="topbar-divider"></span>
+        <template v-if="st">
+          <span class="badge info">{{ engineLabel }}</span>
+          <span class="badge">v{{ st.version }}</span>
+          <span class="badge" :class="st.gateway_running ? 'ok' : ''">
+            <span class="dot" :class="st.gateway_running ? 'ok' : 'off'"></span>
+            :{{ st.gateway_addr ? st.gateway_addr.split(':').pop() : '—' }}
+          </span>
+          <span v-if="st.hardware" class="badge info">{{ st.hardware_summary }}</span>
+        </template>
         <div class="spacer"></div>
-        <span v-if="st" class="hint">今日 {{ st.metrics.total_requests }} 次请求 · {{ st.metrics.tps.toFixed(1) }} t/s</span>
-        <button class="sm" @click="bootstrap">刷新</button>
+        <span v-if="st" class="topbar-metric">
+          <b>{{ st.metrics.total_requests }}</b> 次请求
+          <span class="metric-sep">·</span>
+          <b>{{ st.metrics.tps.toFixed(1) }}</b> t/s
+        </span>
+        <button class="sm" title="刷新状态" @click="bootstrap"><Icon :name="'refresh'" :size="14" />刷新</button>
         <button class="sm primary" @click="toggleGateway">
+          <Icon :name="st && st.gateway_running ? 'stop' : 'play'" :size="14" :stroke="2.2" />
           {{ st && st.gateway_running ? '停止网关' : '启动网关' }}
         </button>
       </header>
@@ -142,3 +162,35 @@ onBeforeUnmount(() => {
     <div v-if="state.toast" class="toast" :class="state.toast.kind">{{ state.toast.message }}</div>
   </div>
 </template>
+
+<style scoped>
+.side-status .status-line {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-weight: 500;
+}
+.side-status .status-sub {
+  font-size: 11px;
+  color: var(--text-mute);
+  margin-left: auto;
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.topbar-metric {
+  font-size: 12px;
+  color: var(--text-mute);
+  white-space: nowrap;
+  margin-right: 2px;
+}
+.topbar-metric b {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+}
+.topbar-metric .metric-sep {
+  margin: 0 6px;
+  opacity: 0.5;
+}
+</style>

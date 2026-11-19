@@ -4,6 +4,7 @@ import { api } from '../api'
 import { state, notify, refreshStatus, refreshNetwork, engineLabel, engineSchedulable } from '../store'
 import LineChart from '../components/LineChart.vue'
 import QrCode from '../components/QrCode.vue'
+import Icon from '../components/Icon.vue'
 
 const testing = ref(false)
 const prompt = ref('用一句话介绍你自己。')
@@ -28,14 +29,14 @@ const recommendedIface = computed(() => {
 const tpsSeries = computed(() => [
   {
     name: 't/s',
-    color: '#6ea8fe',
+    color: '--accent',
     points: ((st.value && st.value.metrics.recent) || []).map((s) => ({ t: s.t, v: s.tps })),
   },
 ])
 const vramSeries = computed(() => [
   {
     name: '显存',
-    color: '#8b7cf6',
+    color: '--accent-2',
     points: ((st.value && st.value.metrics.recent) || []).map((s) => ({ t: s.t, v: s.vram_used_mb / 1024 })),
   },
 ])
@@ -150,7 +151,7 @@ onMounted(refreshNetwork)
     <div class="grid cols-2">
       <div class="card">
         <div class="card-head">
-          <h3>吞吐曲线（2 秒采样）</h3>
+          <h3><Icon name="activity" :size="16" />吞吐曲线（2 秒采样）</h3>
           <div class="spacer"></div>
           <span class="badge">{{ st ? st.metrics.recent.length : 0 }} 点</span>
         </div>
@@ -158,7 +159,7 @@ onMounted(refreshNetwork)
       </div>
       <div class="card">
         <div class="card-head">
-          <h3>显存占用（GB）</h3>
+          <h3><Icon name="drive" :size="16" />显存占用（GB）</h3>
           <div class="spacer"></div>
           <span class="badge" :class="usedPct > 90 ? 'err' : usedPct > 75 ? 'warn' : 'ok'">{{ usedPct.toFixed(0) }}%</span>
         </div>
@@ -176,9 +177,9 @@ onMounted(refreshNetwork)
     <div class="grid cols-2">
       <div class="card">
         <div class="card-head">
-          <h3>硬件自检</h3>
+          <h3><Icon name="cpu" :size="16" />硬件自检</h3>
           <div class="spacer"></div>
-          <button class="sm" @click="rescan">重新自检</button>
+          <button class="sm" @click="rescan"><Icon name="refresh" :size="13" />重新自检</button>
         </div>
         <table v-if="hw">
           <tbody>
@@ -223,7 +224,7 @@ onMounted(refreshNetwork)
 
       <div class="card">
         <div class="card-head">
-          <h3>设备接入（手机 / 笔记本 / 平板）</h3>
+          <h3><Icon name="globe" :size="16" />设备接入（手机 / 笔记本 / 平板）</h3>
         </div>
         <div v-if="net" class="row wrap" style="gap: 18px; align-items: flex-start">
           <QrCode :text="net.base_url" :size="170" />
@@ -231,7 +232,7 @@ onMounted(refreshNetwork)
             <div class="hint">Base URL（API Key 留空）</div>
             <div class="row" style="margin: 6px 0 12px">
               <input readonly :value="net.base_url" />
-              <button class="sm" @click="copy(net.base_url)">复制</button>
+              <button class="sm" @click="copy(net.base_url)"><Icon name="copy" :size="13" />复制</button>
             </div>
             <div class="hint">{{ net.tip }}</div>
             <div class="hint" style="margin-top: 8px">
@@ -262,7 +263,7 @@ onMounted(refreshNetwork)
 
     <div class="card">
       <div class="card-head">
-        <h3>快捷试运行</h3>
+        <h3><Icon name="terminal" :size="16" />快捷试运行</h3>
         <div class="spacer"></div>
         <select v-model="testModel" style="max-width: 260px">
           <option value="">（自动选择已加载模型）</option>
@@ -271,7 +272,9 @@ onMounted(refreshNetwork)
       </div>
       <div class="row">
         <input v-model="prompt" placeholder="输入一句话，直接问本机模型" @keyup.enter="runTest" />
-        <button class="primary" :disabled="testing" @click="runTest">{{ testing ? '生成中…' : '发送' }}</button>
+        <button class="primary" :disabled="testing" @click="runTest">
+          <Icon :name="testing ? 'refresh' : 'play'" :size="14" />{{ testing ? '生成中…' : '发送' }}
+        </button>
       </div>
       <pre v-if="reply" class="copybox">{{ reply }}</pre>
       <div v-else class="hint" style="margin-top: 8px">

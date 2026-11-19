@@ -88,16 +88,17 @@ function draw() {
       if (i === 0) ctx.moveTo(x, y)
       else ctx.lineTo(x, y)
     })
-    ctx.strokeStyle = s.color || '#6ea8fe'
-    ctx.lineWidth = si === 0 ? 2 : 1.6
+    const lineColor = resolveColor(s.color, '#6ea8fe')
+    ctx.strokeStyle = lineColor
+    ctx.lineWidth = si === 0 ? 2.2 : 1.8
     ctx.lineJoin = 'round'
+    ctx.lineCap = 'round'
     ctx.stroke()
 
     if (si === 0) {
       const grad = ctx.createLinearGradient(0, padT, 0, padT + innerH)
-      const c = s.color || '#6ea8fe'
-      grad.addColorStop(0, hexA(c, 0.28))
-      grad.addColorStop(1, hexA(c, 0))
+      grad.addColorStop(0, toRGBA(lineColor, 0.3))
+      grad.addColorStop(1, toRGBA(lineColor, 0))
       ctx.lineTo(xAt(n - 1), padT + innerH)
       ctx.lineTo(xAt(n - pts.length), padT + innerH)
       ctx.closePath()
@@ -107,9 +108,29 @@ function draw() {
   })
 }
 
+// color 可以是 '--css-var' 形式（跟随主题），也可以是 #hex / rgb()
+function resolveColor(color, fallback) {
+  if (!color) return fallback
+  if (color.startsWith('--')) return cssVar(color, fallback)
+  return color
+}
+
+// 把 #hex / rgb() / var 解析成 rgba(...)，用于渐变透明
+function toRGBA(color, a) {
+  const c = color.trim()
+  if (c.startsWith('rgb')) {
+    return c.replace(/rgba?\(([^)]+)\)/, (_, inner) => {
+      const parts = inner.split(/[,/\s]+/).filter(Boolean)
+      return `rgba(${parts[0]},${parts[1]},${parts[2]},${a})`
+    })
+  }
+  return hexA(c, a)
+}
+
 function hexA(hex, a) {
   const h = hex.replace('#', '')
   const n = parseInt(h.length === 3 ? h.split('').map((c) => c + c).join('') : h, 16)
+  if (Number.isNaN(n)) return `rgba(110,168,254,${a})`
   return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`
 }
 

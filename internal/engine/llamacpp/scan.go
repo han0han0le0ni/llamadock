@@ -110,13 +110,18 @@ func ScanModels(roots []string, cache *metaCache, budget time.Duration) []engine
 	deadline := time.Now().Add(budget)
 	out := make([]engine.Model, 0, len(found))
 	for _, f := range found {
+		base := filepath.Base(f.path)
 		m := engine.Model{
 			ID:     f.path,
-			Name:   strings.TrimSuffix(filepath.Base(f.path), filepath.Ext(f.path)),
+			Name:   strings.TrimSuffix(base, filepath.Ext(base)),
 			Path:   f.path,
 			Type:   "llm",
 			SizeMB: int(f.size / (1024 * 1024)),
 			State:  "not-loaded",
+		}
+		// 文件名兜底：即使 GGUF 头部没来得及解析，mmproj 附件也不能当对话模型。
+		if strings.HasPrefix(strings.ToLower(base), "mmproj") {
+			m.Type = "mmproj"
 		}
 		if meta, ok := cache.get(f.path, f.size); ok {
 			m.Meta = meta
@@ -140,10 +145,26 @@ func applyMeta(m *engine.Model, meta *gguf.Meta) {
 	if meta.SizeMB > 0 {
 		m.SizeMB = meta.SizeMB
 	}
-	if strings.Contains(strings.ToLower(meta.Arch), "bert") || strings.Contains(strings.ToLower(meta.Arch), "embed") {
+	// 用 GGUF 解析出的角色分类覆盖类型；这比 arch 字符串匹配更可靠
+	// （mmproj 的 arch 是 clip，扩散模型的 arch 是 qwen_image/flux…，都不是对话模型）。
+	switch meta.Kind {
+	case "mmproj":
+		m.Type = "mmproj"
+	case "diffusion":
+		m.Type = "diffusion"
+	case "embedding":
 		m.Type = "embeddings"
-	}
-	if strings.Contains(strings.ToLower(meta.Arch), "vl") || strings.Contains(strings.ToLower(meta.Arch), "vision") {
+	case "vlm":
 		m.Type = "vlm"
+	case "chat":
+		m.Type = "llm"
+	default:
+		// 旧缓存（无 Kind）走原有兜底逻辑。
+		if strings.Contains(strings.ToLower(meta.Arch), "bert") || strings.Contains(strings.ToLower(meta.Arch), "embed") {
+			m.Type = "embeddings"
+		}
+		if strings.Contains(strings.ToLower(meta.Arch), "vl") || strings.Contains(strings.ToLower(meta.Arch), "vision") {
+			m.Type = "vlm"
+		}
 	}
 }

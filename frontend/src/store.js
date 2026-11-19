@@ -1,6 +1,11 @@
 import { reactive, computed } from 'vue'
 import { api } from './api'
 
+// 生图功能软开关。
+// false = 隐藏生图入口与设置区、关闭本机生图引擎；后端 sd.cpp 代码与配置保留，
+// 识图（mmproj / VLM）相关逻辑完全不受影响。想恢复时把它改回 true 即可。
+export const IMAGE_FEATURE_ENABLED = false
+
 export const state = reactive({
   ready: false,
   loading: true,
